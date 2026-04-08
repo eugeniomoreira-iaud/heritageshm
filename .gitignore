@@ -1,0 +1,25 @@
+# Jupyter Notebook cache
+.ipynb_checkpoints/
+*/.ipynb_checkpoints/*
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual Environments
+.env
+.venv
+env/
+venv/
+neuralprophet_env/
+
+# Data and Outputs
+data/raw/
+data/interim/
+data/processed/
+outputs/figures/
+outputs/models/
+
+# (Optional) Track tables
+# outputs/tables/ 

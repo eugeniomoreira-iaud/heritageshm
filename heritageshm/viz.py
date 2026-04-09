@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import seaborn as sns
 
-def apply_theme(context='notebook', style='whitegrid', palette='colorblind', custom_rc=None):
+def apply_theme(context='notebook', style='ticks', palette='viridis', custom_rc=None):
     """
     Applies the global seaborn theme.
     
@@ -88,6 +88,7 @@ def plot_annual_overlay(data, y_var, plot_type='scatter', cmap='viridis',
                               end=mdates.num2date(xtick_end), periods=num_xticks)
     ax.set_xticks(new_ticks)
     
+    sns.despine()
     plt.tight_layout()
     
     if save_plot:
@@ -125,6 +126,7 @@ def plot_time_series_comparison(df, cols, colors=None, plot_type='line',
     ax.set_title(title if title else 'Time Series Comparison')
     ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
     
+    sns.despine()
     fig.autofmt_xdate()
     plt.tight_layout()
     
@@ -154,6 +156,7 @@ def plot_gap_availability(df, target_col, freq='D',
     ax.set_xlabel('Date')
     ax.legend()
     
+    sns.despine()
     fig.autofmt_xdate()
     plt.tight_layout()
     

@@ -27,8 +27,12 @@ This project presents a generic, two-phase workflow that moves from raw sensor c
 /heritage_shm_project
 │
 ├── /data                    # Unprocessed, interim, and fully processed datasets
-│   ├── /raw                 # Expected location for raw CSVs (ignored by Git)
-│   ├── /interim             # Synchronized data
+│   ├── /raw                 # Expected location for raw files (ignored by Git)
+│   │   ├── /sensor          # Raw sensor files (e.g., .adc)
+│   │   └── /proxies         # Environment proxies in .csv format (e.g., ERA5)
+│   ├── /interim             # Intermediate cached data
+│   │   ├── /sensor          # Cleaned and standardized sensor DataFrames
+│   │   └── /aligned         # Synchronized datasets (sensor + proxies)
 │   └── /processed           # Imputed and decomposed time series
 │
 ├── /outputs                 # Generated artifacts (ignored by Git)
@@ -46,6 +50,7 @@ This project presents a generic, two-phase workflow that moves from raw sensor c
 │   ├── monitoring.py        # EWMA/CUSUM control logic
 │   └── viz.py               # Seaborn/matplotlib wrappers for visualization
 │
+├── 00_Sensor_Preprocessing.ipynb
 ├── 01_Data_Quality_and_Gaps.ipynb
 ├── 02_Proxy_Validation_and_Lags.ipynb
 ├── 03_Imputation_Benchmark.ipynb
@@ -68,8 +73,8 @@ conda activate heritageshm_env
 
 ### 2. Supplying the Data
 Due to size and privacy limits, the `/data/` and `/outputs/` directories are tracked locally but ignored by Git. To run this pipeline:
-1. Place your target static sensor data into `/data/raw/`.
-2. Place your environmental proxy data into `/data/raw/`.
+1. Place your target static sensor data into `/data/raw/sensor/`.
+2. Place your environmental proxy data into `/data/raw/proxies/` as CSV files.
 
 ### 3. Running the Pipeline
 The methodology is intended to be executed sequentially via the provided Jupyter Notebooks. The UI-agnostic design of the `heritageshm` library allows these tools to be easily integrated into standalone dashboard interfaces in the future.
@@ -78,4 +83,4 @@ Launch the interactive environment:
 ```bash
 python -m jupyterlab
 ```
-Execute the notebooks in order from `01` to `04` to replicate the full analytical workflow.
+Execute the notebooks in order from `00` to `04` to replicate the full analytical workflow.

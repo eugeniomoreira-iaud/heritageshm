@@ -138,3 +138,46 @@ def align_and_resample(df_sensor, df_proxy, resample_freq='1H', interpolation='t
     
     print(f"Final aligned dataset contains {len(df_merged)} rows.")
     return df_merged
+
+def align_multiple_proxies(df_sensor, proxies_dict, resample_freq='1H', interpolation='time'):
+    """
+    Synchronizes the on-site sensor data with multiple external proxy datasets.
+    
+    Parameters:
+    - df_sensor: DataFrame of high-frequency sensor data.
+    - proxies_dict: Dictionary of proxy DataFrames, e.g. {'era5': df_era, 'local': df_loc}.
+    - resample_freq: The target frequency string (e.g., '1H' for hourly).
+    - interpolation: Method to fill gaps during upsampling ('time', 'spline', 'linear').
+    """
+    print(f"Resampling sensor data to {resample_freq}...")
+    
+    sensor_resampled = df_sensor.resample(resample_freq).mean()
+    
+    if interpolation == 'spline':
+        sensor_resampled = sensor_resampled.interpolate(method='spline', order=3)
+    elif interpolation:
+        sensor_resampled = sensor_resampled.interpolate(method=interpolation)
+        
+    df_merged = sensor_resampled
+    
+    for name, df_proxy in proxies_dict.items():
+        print(f"Resampling proxy '{name}' to {resample_freq}...")
+        proxy_resampled = df_proxy.resample(resample_freq).mean()
+        
+        # Rename columns to avoid collisions
+        proxy_resampled.columns = [f"{name}_{col}" for col in proxy_resampled.columns]
+        
+        print(f"Merging '{name}'...")
+        # Inner join to keep only the overlapping monitoring period
+        df_merged = pd.merge(df_merged, proxy_resampled, left_index=True, right_index=True, how='inner')
+        
+    print(f"Final aligned dataset contains {len(df_merged)} rows.")
+    return df_merged
+
+def temp_compensation(df, target_col, temp_col='temp', comp_coeff=0.005):
+    """
+    Calculates compensation value based on continuous baseline temperature variation.
+    Intended to be passed into apply_compensation().
+    """
+    temp_diff = (df[temp_col] - df[temp_col].iloc[0]) * comp_coeff * 1000
+    return df[target_col] - temp_diff

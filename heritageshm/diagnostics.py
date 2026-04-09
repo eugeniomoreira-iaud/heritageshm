@@ -5,6 +5,7 @@ and residual diagnostics (ADF, Ljung-Box).
 """
 import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
 from statsmodels.tsa.stattools import coint, adfuller
 from statsmodels.stats.diagnostic import acorr_ljungbox
 from scipy.stats import pearsonr
@@ -47,29 +48,53 @@ def shift_and_correlate(df, target, proxy, max_lag, step=1):
         
     return lags, corrs
 
-def characterize_gaps(df, target_col):
+def characterize_gaps(df, target_col, max_impute_gap=0, save_plot_path=None):
     """
     Characterizes missing data: gap duration, continuity, and recurrence.
-    Returns statistical summary and a series of exact gap lengths.
+    Optionally applies linear interpolation for small gaps.
+    Generates a histogram plot of the gap lengths and returns the updated dataframe, 
+    statistical summary, and a series of exact gap lengths.
     
     Parameters:
     - df: DataFrame with a DatetimeIndex.
     - target_col: The column to analyze for missing data.
+    - max_impute_gap: Maximum number of consecutive missing values to interpolate linearly. Default 0 (no imputation).
+    - save_plot_path: Path to save the generated histogram figure. Optional.
     
     Returns:
+    - df_imputed: DataFrame with simple imputation applied (if max_impute_gap > 0).
     - gap_stats: A pandas Series containing descriptive statistics of the gaps.
     - gap_lengths: A Series listing the exact length of every continuous gap sequence.
     """
     if target_col not in df.columns:
         raise KeyError(f"Column '{target_col}' not found in DataFrame.")
         
+    df_imputed = df.copy()
+    
+    if max_impute_gap > 0:
+        print(f"Applying linear interpolation strictly for complete gaps <= {max_impute_gap} consecutive values...")
+        mask = df_imputed[target_col].isnull()
+        if mask.any():
+            # Calculate length of each gap block
+            blocks = mask.astype(int).groupby(mask.astype(int).diff().ne(0).cumsum())
+            gap_sizes = blocks.transform('sum')
+            
+            # Interpolate everything linearly
+            interp = df_imputed[target_col].interpolate(method='linear')
+            
+            # Restore NaNs for blocks that were strictly larger than max_impute_gap
+            too_large_mask = mask & (gap_sizes > max_impute_gap)
+            interp[too_large_mask] = np.nan
+            
+            df_imputed[target_col] = interp
+        
     # Create a boolean mask where True = missing data
-    missing_mask = df[target_col].isnull()
+    missing_mask = df_imputed[target_col].isnull()
     
     # If there is no missing data at all
     if not missing_mask.any():
         print(f"No missing data found in '{target_col}'.")
-        return pd.Series(dtype=float), pd.Series(dtype=int)
+        return df_imputed, pd.Series(dtype=float), pd.Series(dtype=int)
         
     # Group contiguous True values
     # diff().ne(0).cumsum() creates unique IDs for contiguous blocks
@@ -94,7 +119,23 @@ def characterize_gaps(df, target_col):
         print("Diagnosis: Gaps appear scattered and random (MCAR).")
         print("Recommendation: Standard interpolation or basic models may suffice.")
         
-    return gap_stats, gap_lengths
+    # Plotting the histogram
+    plt.figure(figsize=(10, 5))
+    plt.hist(gap_lengths, bins=50, color='tab:red', alpha=0.7, edgecolor='black')
+    plt.title(f'Distribution of Consecutive Gap Sizes (max_impute_gap={max_impute_gap})')
+    plt.xlabel('Gap Length (Consecutive Missing Time Steps)')
+    plt.ylabel('Frequency (Number of Occurrences)')
+    plt.yscale('log') # Log scale because there are many short gaps and few long gaps
+    plt.grid(True, alpha=0.3, axis='y')
+    plt.tight_layout()
+    
+    if save_plot_path:
+        plt.savefig(save_plot_path)
+        print(f"Saved histogram to {save_plot_path}")
+        
+    plt.show()
+        
+    return df_imputed, gap_stats, gap_lengths
 
 def test_cointegration(df, target_col, proxy_col, alpha=0.05):
     """

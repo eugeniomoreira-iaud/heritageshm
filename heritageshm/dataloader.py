@@ -66,14 +66,20 @@ def read_sensor_file(file_path, sep='\t', header=None, column_names=None,
 
     # Parse Datetime and set as index
     if date_col in df.columns and time_col in df.columns:
-        # Assuming DD/MM/YY or YYYY-MM-DD, pd.to_datetime usually handles it.
-        # dayfirst=True helps with DD/MM/YY formats common in European datasets.
-        df['datetime'] = pd.to_datetime(df[date_col].astype(str) + ' ' + df[time_col].astype(str), dayfirst=True, errors='coerce')
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            # Assuming DD/MM/YY or YYYY-MM-DD, pd.to_datetime usually handles it.
+            # dayfirst=True helps with DD/MM/YY formats common in European datasets.
+            df['datetime'] = pd.to_datetime(df[date_col].astype(str) + ' ' + df[time_col].astype(str), dayfirst=True, format='mixed', errors='coerce')
         
         # Drop the old strings
         df = df.drop(columns=[date_col, time_col])
     elif date_col in df.columns:
-        df['datetime'] = pd.to_datetime(df[date_col], dayfirst=True, errors='coerce')
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            df['datetime'] = pd.to_datetime(df[date_col], dayfirst=True, format='mixed', errors='coerce')
         df = df.drop(columns=[date_col])
     else:
         raise KeyError(f"Could not find the specified date/time columns ('{date_col}', '{time_col}') to create a DatetimeIndex.")

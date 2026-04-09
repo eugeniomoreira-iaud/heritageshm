@@ -7,6 +7,7 @@ and residual diagnostics (ADF, Ljung-Box).
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import seaborn as sns
 from statsmodels.tsa.stattools import coint, adfuller
 from statsmodels.stats.diagnostic import acorr_ljungbox
 from scipy.stats import pearsonr
@@ -156,6 +157,7 @@ def characterize_gaps(
     plt.ylabel("Frequency (Number of Occurrences)")
     plt.yscale("log")  # Log scale because there are many short gaps and few long gaps
     plt.grid(True, alpha=0.3, axis="y")
+    sns.despine()
     plt.tight_layout()
 
     if save_plot_path:

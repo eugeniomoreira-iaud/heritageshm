@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import seaborn as sns
 
-def apply_theme(context='notebook', style='ticks', palette='viridis', custom_rc=None):
+def apply_theme(context='notebook', style='ticks', palette='colorblind', custom_rc=None):
     """
     Applies the global seaborn theme.
     
@@ -47,8 +47,9 @@ def plot_annual_overlay(data, y_var, plot_type='scatter', cmap='viridis',
     """
     Overlays multiple years of data onto a single 12-month calendar axis.
     """
-    # Apply theme (use empty dict if None provided)
-    apply_theme(**(theme_kwargs or {}))
+    # Apply theme only if explicitly provided
+    if theme_kwargs is not None:
+        apply_theme(**theme_kwargs)
     
     df = data.copy()
     if y_var not in df.columns:
@@ -104,7 +105,8 @@ def plot_time_series_comparison(df, cols, colors=None, plot_type='line',
     """
     Standard time series plot for comparing multiple columns over chronological time.
     """
-    apply_theme(**(theme_kwargs or {}))
+    if theme_kwargs is not None:
+        apply_theme(**theme_kwargs)
     
     if colors is None:
         colors = sns.color_palette(n_colors=len(cols))
@@ -141,7 +143,8 @@ def plot_gap_availability(df, target_col, freq='D',
     """
     Visualizes the daily data availability (missing vs. recorded points).
     """
-    apply_theme(**(theme_kwargs or {}))
+    if theme_kwargs is not None:
+        apply_theme(**theme_kwargs)
     
     counts = df[target_col].resample(freq).count()
     max_expected = df.resample(freq).size().max() 

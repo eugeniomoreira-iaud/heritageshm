@@ -7,6 +7,45 @@ import pandas as pd
 import numpy as np
 from statsmodels.tsa.stattools import coint, adfuller
 from statsmodels.stats.diagnostic import acorr_ljungbox
+from scipy.stats import pearsonr
+
+def shift_and_correlate(df, target, proxy, max_lag, step=1):
+    """
+    Screens cross-correlation across varying lags to find the optimal thermal inertia.
+    
+    Parameters:
+    - df: DataFrame containing target and proxy.
+    - target: Name of the target column.
+    - proxy: Name of the proxy column.
+    - max_lag: Maximum lag to test (e.g., 72 hours).
+    - step: Step size for lags.
+    
+    Returns:
+    - lags: Array of tested lag values.
+    - corrs: Pearson correlation at each lag.
+    """
+    lags = np.arange(0, max_lag + 1, step)
+    corrs = []
+    
+    # Drop NaNs just for the correlation window
+    df_clean = df[[target, proxy]].dropna()
+    
+    for lag in lags:
+        if lag == 0:
+            shifted = df_clean[proxy]
+        else:
+            shifted = df_clean[proxy].shift(lag)
+            
+        # Re-drop NaNs after shift
+        valid = pd.concat([df_clean[target], shifted], axis=1).dropna()
+        if len(valid) > 100:
+            r, _ = pearsonr(valid.iloc[:,0], valid.iloc[:,1])
+        else:
+            r = 0
+            
+        corrs.append(r)
+        
+    return lags, corrs
 
 def characterize_gaps(df, target_col):
     """

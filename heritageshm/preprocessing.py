@@ -139,7 +139,7 @@ def align_and_resample(df_sensor, df_proxy, resample_freq='1H', interpolation='t
     print(f"Final aligned dataset contains {len(df_merged)} rows.")
     return df_merged
 
-def align_multiple_proxies(df_sensor, proxies_dict, resample_freq='h', interpolation=None):
+def align_multiple_proxies(df_sensor, proxies_dict, resample_freq='h', interpolation=None, add_prefix=True):
     """
     Synchronizes the on-site sensor data with multiple external proxy datasets.
     
@@ -152,6 +152,7 @@ def align_multiple_proxies(df_sensor, proxies_dict, resample_freq='h', interpola
     - resample_freq: The target frequency string (e.g., 'h' for hourly).
     - interpolation: Method to fill small gaps during upsampling ('time', 'spline', 'linear').
                      Set to None (default) to preserve all NaNs for gap characterization.
+    - add_prefix: Boolean. If True, prefixes proxy columns with their dictionary key.
     """
     print(f"Resampling sensor data to {resample_freq}...")
     
@@ -187,7 +188,8 @@ def align_multiple_proxies(df_sensor, proxies_dict, resample_freq='h', interpola
         proxy_resampled = df_proxy.resample(resample_freq).mean()
         
         # Rename columns to avoid collisions
-        proxy_resampled.columns = [f"{name}_{col}" for col in proxy_resampled.columns]
+        if add_prefix:
+            proxy_resampled.columns = [f"{name}_{col}" for col in proxy_resampled.columns]
         
         print(f"Merging '{name}'...")
         # Left join to keep the full sensor index (proxies fill where available)

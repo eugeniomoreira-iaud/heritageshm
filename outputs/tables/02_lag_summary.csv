@@ -1,0 +1,9 @@
+,optimal_lag_h,max_abs_pearson_r
+temp,0,0.6894271012531833
+oikolab_urban_temperature (degC),0,0.6828666270131688
+oikolab_temperature (degC),0,0.6803745450335796
+oikolab_wetbulb_temperature (degC),0,0.6658380276833252
+oikolab_skin_temperature (degC),1,0.6652587782662641
+oikolab_dewpoint_temperature (degC),0,0.5924161474839407
+oikolab_surface_thermal_radiation (W/m^2),0,0.5401479581552346
+oikolab_surface_solar_radiation (W/m^2),2,0.31601648272517474

@@ -1,0 +1,9 @@
+proxy,F_statistic,p_value,conclusion_5pct
+temp,45788.97,0.0,CONFIRMED
+oikolab_surface_solar_radiation (W/m^2),6609.69,0.0,CONFIRMED
+oikolab_urban_temperature (degC),5525.9,0.0,CONFIRMED
+oikolab_temperature (degC),5013.19,0.0,CONFIRMED
+oikolab_skin_temperature (degC),4991.5,0.0,CONFIRMED
+oikolab_wetbulb_temperature (degC),2773.34,0.0,CONFIRMED
+oikolab_surface_thermal_radiation (W/m^2),474.19,0.0,CONFIRMED
+oikolab_dewpoint_temperature (degC),62.84,0.0,CONFIRMED

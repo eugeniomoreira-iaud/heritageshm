@@ -139,24 +139,46 @@ def align_and_resample(df_sensor, df_proxy, resample_freq='1H', interpolation='t
     print(f"Final aligned dataset contains {len(df_merged)} rows.")
     return df_merged
 
-def align_multiple_proxies(df_sensor, proxies_dict, resample_freq='1H', interpolation='time'):
+def align_multiple_proxies(df_sensor, proxies_dict, resample_freq='h', interpolation=None):
     """
     Synchronizes the on-site sensor data with multiple external proxy datasets.
+    
+    Creates a complete regular time index spanning the full sensor date range,
+    so that periods with no observations are preserved as NaN for gap analysis.
     
     Parameters:
     - df_sensor: DataFrame of high-frequency sensor data.
     - proxies_dict: Dictionary of proxy DataFrames, e.g. {'era5': df_era, 'local': df_loc}.
-    - resample_freq: The target frequency string (e.g., '1H' for hourly).
-    - interpolation: Method to fill gaps during upsampling ('time', 'spline', 'linear').
+    - resample_freq: The target frequency string (e.g., 'h' for hourly).
+    - interpolation: Method to fill small gaps during upsampling ('time', 'spline', 'linear').
+                     Set to None (default) to preserve all NaNs for gap characterization.
     """
     print(f"Resampling sensor data to {resample_freq}...")
     
+    # Resample sensor to target frequency (aggregates sub-intervals via mean)
     sensor_resampled = df_sensor.resample(resample_freq).mean()
     
-    if interpolation == 'spline':
-        sensor_resampled = sensor_resampled.interpolate(method='spline', order=3)
-    elif interpolation:
-        sensor_resampled = sensor_resampled.interpolate(method=interpolation)
+    # Create a COMPLETE regular index from first to last timestamp
+    full_index = pd.date_range(
+        start=sensor_resampled.index.min(),
+        end=sensor_resampled.index.max(),
+        freq=resample_freq
+    )
+    
+    # Reindex onto the complete grid — missing periods become NaN
+    sensor_resampled = sensor_resampled.reindex(full_index)
+    sensor_resampled.index.name = 'datetime'
+    
+    print(f"Complete index: {len(full_index)} time steps "
+          f"({sensor_resampled.index.min()} → {sensor_resampled.index.max()})")
+    print(f"Sensor NaN rows (gaps): {sensor_resampled.isna().any(axis=1).sum()}")
+    
+    # Only interpolate if explicitly requested (preserves NaN gaps by default)
+    if interpolation:
+        if interpolation == 'spline':
+            sensor_resampled = sensor_resampled.interpolate(method='spline', order=3)
+        else:
+            sensor_resampled = sensor_resampled.interpolate(method=interpolation)
         
     df_merged = sensor_resampled
     
@@ -168,8 +190,8 @@ def align_multiple_proxies(df_sensor, proxies_dict, resample_freq='1H', interpol
         proxy_resampled.columns = [f"{name}_{col}" for col in proxy_resampled.columns]
         
         print(f"Merging '{name}'...")
-        # Inner join to keep only the overlapping monitoring period
-        df_merged = pd.merge(df_merged, proxy_resampled, left_index=True, right_index=True, how='inner')
+        # Left join to keep the full sensor index (proxies fill where available)
+        df_merged = pd.merge(df_merged, proxy_resampled, left_index=True, right_index=True, how='left')
         
     print(f"Final aligned dataset contains {len(df_merged)} rows.")
     return df_merged

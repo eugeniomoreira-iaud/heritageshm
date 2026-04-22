@@ -8,7 +8,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
-from statsmodels.tsa.stattools import coint, adfuller
+from statsmodels.tsa.stattools import coint, adfuller, kpss
 from statsmodels.stats.diagnostic import acorr_ljungbox
 from scipy.stats import pearsonr
 
@@ -272,3 +272,42 @@ def test_residual_whiteness(residuals, lags=10, alpha=0.05):
         print(f"Result: Residuals show significant autocorrelation.")
 
     return is_white, p_value
+
+def test_signal_stationarity(df, cols, alpha=0.05):
+    """
+    Runs the Augmented Dickey-Fuller test on a list of columns to determine
+    their integration order. Used to justify the choice of Pearson correlation
+    (I(0) signals) vs. cointegration testing (I(1) signals).
+
+    Parameters:
+    - df: DataFrame with a DatetimeIndex.
+    - cols: List of column names to test.
+    - alpha: Significance level (default 0.05).
+
+    Returns:
+    - results: DataFrame with ADF statistic, p-value, and stationarity verdict per column.
+    """
+    records = []
+    for col in cols:
+        series = df[col].dropna()
+        if len(series) < 20:
+            records.append({
+                'Variable': col,
+                'ADF Statistic': None,
+                'p-value': None,
+                'Stationary (I(0))': None,
+                'Decision': 'Insufficient data'
+            })
+            continue
+        adf_stat, p_value, _, _, _, _ = adfuller(series, autolag='AIC')
+        is_stationary = p_value < alpha
+        records.append({
+            'Variable': col,
+            'ADF Statistic': round(adf_stat, 4),
+            'p-value': round(p_value, 6),
+            'Stationary (I(0))': is_stationary,
+            'Decision': 'Proceed with Pearson' if is_stationary else '⚠ Difference or test cointegration'
+        })
+        print(f"{col:50s}  ADF={adf_stat:8.4f}  p={p_value:.4e}  {'✓ I(0)' if is_stationary else '✗ I(1)'}")
+
+    return pd.DataFrame(records).set_index('Variable')

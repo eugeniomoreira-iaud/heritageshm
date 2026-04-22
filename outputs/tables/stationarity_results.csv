@@ -1,0 +1,10 @@
+series,adf_p,adf_reject,kpss_p,kpss_reject,verdict
+absinc,0.031187713157451717,True,0.01,True,ambiguous
+temperature (degC),2.08694759074429e-08,True,0.09179142764732937,False,I(0)
+dewpoint_temperature (degC),6.256919987890944e-15,True,0.05134659014251595,False,I(0)
+relative_humidity (0-1),1.6274786897779824e-29,True,0.1,False,I(0)
+wetbulb_temperature (degC),4.231171040021226e-10,True,0.07680902792484429,False,I(0)
+skin_temperature (degC),5.237481028690726e-07,True,0.1,False,I(0)
+urban_temperature (degC),2.7490166555360976e-06,True,0.1,False,I(0)
+surface_solar_radiation (W/m^2),7.132513549316241e-14,True,0.08799778488060385,False,I(0)
+surface_thermal_radiation (W/m^2),1.3060050766480066e-21,True,0.032590392408982954,True,ambiguous

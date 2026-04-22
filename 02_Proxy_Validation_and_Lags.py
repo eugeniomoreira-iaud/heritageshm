@@ -35,19 +35,19 @@ import warnings
 warnings.filterwarnings("ignore")
 
 sys.path.insert(0, os.path.abspath('..'))
-from heritageshm.diagnostics import shift_and_correlate
+from heritageshm.diagnostics import shift_and_correlate, test_signal_stationarity
 from heritageshm.viz import apply_theme
 
 apply_theme(context='notebook')
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
 DATA_PATH   = "data/interim/aligned/st02_aligned_dataset.csv"
-OUTPUT_PATH = "data/processed/feature_matrix.parquet"
+OUTPUT_PATH = "data/processed/feature_matrix.csv"
 FIG_PATH    = "outputs/figures/"
 
 # ── Config ────────────────────────────────────────────────────────────────────
 TARGET      = "absinc"
-MAX_LAG_H   = 72          # maximum lag to screen (hours); 72h = 3 days thermal memory
+MAX_LAG_H   = 12          # maximum lag to screen (hours); 72h = 3 days thermal memory
 LAG_STEP    = 1           # step in hours
 
 # %% [markdown]
@@ -94,10 +94,47 @@ for ax, proxy in zip(axes, proxies):
     
     lines_1, labels_1 = ax.get_legend_handles_labels()
     lines_2, labels_2 = ax2.get_legend_handles_labels()
-    ax.legend(lines_1 + lines_2, labels_1 + labels_2, loc='upper left')
+    # ax.legend(lines_1 + lines_2, labels_1 + labels_2, loc='upper left')
 
 plt.tight_layout()
 plt.show()
+
+# %% [markdown]
+# ## Step 1b · Reference Window and Differenced Series
+#
+# **Reference window.** The target signal contains gaps of varying length. The analysis is restricted to the longest contiguous non-missing block of the target variable, identified by detecting time jumps larger than 1.5× the expected sampling step. The boundaries of this window — `REF_START` and `REF_END` — are stored as constants for reuse in Notebook 04 as the model training period.
+#
+# **First-order differencing.** All variables within the reference window are first-differenced before Pearson correlation and lag screening. This conservative transformation guarantees stationarity regardless of the individual integration order of each series, eliminating the risk of spurious correlation. Differencing is applied exclusively for proxy ranking and lag identification; the level series
+# `df_ref` is preserved and used for feature matrix assembly in Step 4.
+
+# %%
+# --- Identify longest contiguous non-missing block of the target ---
+target_series = df[TARGET].dropna()
+
+expected_step = pd.Timedelta('1h')  # must match TARGET_FREQ from Notebook 01
+time_diffs = target_series.index.to_series().diff()
+breaks = time_diffs[time_diffs > expected_step * 1.5].index
+
+block_starts = [target_series.index[0]] + list(breaks)
+block_ends   = list(breaks - expected_step) + [target_series.index[-1]]
+block_lengths_h = [(e - s).total_seconds() / 3600 for s, e in zip(block_starts, block_ends)]
+
+longest_idx = int(pd.Series(block_lengths_h).idxmax())
+REF_START   = block_starts[longest_idx]
+REF_END     = block_ends[longest_idx]
+
+print(f"Longest contiguous block : {REF_START} → {REF_END}")
+print(f"Duration                 : {block_lengths_h[longest_idx]:.0f} h "
+      f"({block_lengths_h[longest_idx] / 24:.1f} days)")
+
+# Slice to reference window
+df_ref = df.loc[REF_START:REF_END].copy()
+
+# --- Build first-differenced DataFrame for correlation screening ---
+df_diff = df_ref[[TARGET] + proxies].diff().dropna()
+
+print(f"\nReference window shape   : {df_ref.shape}")
+print(f"Differenced shape        : {df_diff.shape}")
 
 # %% [markdown]
 # ## Step 2 · Initial Pearson Correlation
@@ -105,7 +142,7 @@ plt.show()
 
 # %%
 # Calculate Pearson correlation for all proxies
-initial_corrs = df[[TARGET] + proxies].corr()[TARGET].drop(TARGET).sort_values(key=abs, ascending=False)
+initial_corrs = df_diff.corr()[TARGET].drop(TARGET).sort_values(key=abs, ascending=False)
 print("--- Initial Pearson Correlation (Lag 0) ---")
 print(initial_corrs)
 
@@ -118,7 +155,7 @@ optimal_lags = {}
 plt.figure(figsize=(10, 5))
 
 for proxy in proxies:
-    lags, corrs = shift_and_correlate(df, TARGET, proxy, MAX_LAG_H, LAG_STEP)
+    lags, corrs = shift_and_correlate(df_diff, TARGET, proxy, MAX_LAG_H, LAG_STEP)
     
     # Find lag with maximum absolute correlation
     max_idx = np.argmax(np.abs(corrs))
@@ -128,7 +165,7 @@ for proxy in proxies:
     optimal_lags[proxy] = best_lag
     
     print(f"{proxy}: Optimal Lag = {best_lag}h, r = {best_corr:.3f}")
-    plt.plot(lags, corrs, label=proxy.split('_')[1] if '_' in proxy else proxy)
+    plt.plot(lags, corrs, label=proxy)
 
 plt.title(f"Cross-Correlation w/ {TARGET} across varying Lags")
 plt.xlabel("Lag (Hours)")
@@ -143,23 +180,35 @@ plt.show()
 # Shift the proxies by their optimal lags to construct the final dataset.
 
 # %%
-df_features = df[[TARGET]].copy()
+# Drop proxies excluded from the feature matrix
+EXCLUDE_FROM_FEATURES = [
+    'surface_thermal_radiation (W/m^2)',
+    'urban_temperature (degC)',
+    'wetbulb_temperature (degC)',
+    'dewpoint_temperature (degC)',
+    'temperature (degC)',
+]
+optimal_lags_filtered = {k: v for k, v in optimal_lags.items() if k not in EXCLUDE_FROM_FEATURES}
 
-for proxy, lag in optimal_lags.items():
-    # Shift proxy forward by 'lag' hours 
-    if lag == 0:
-        df_features[f"{proxy}_lag0"] = df[proxy]
-    else:
-        df_features[f"{proxy}_lag{lag}"] = df[proxy].shift(lag)
+# Assemble feature matrix from level series using optimal lags
+df_features = df_ref[[TARGET]].copy()
 
-# Plot correlation heatmap of the final features
-plt.figure(figsize=(10, 8))
+for proxy, lag in optimal_lags_filtered.items():
+    col_name = f"{proxy}_lag{lag}"
+    df_features[col_name] = df_ref[proxy].shift(lag)
+
+df_features = df_features.dropna()
+
+# Plot correlation heatmap
+plt.figure(figsize=(8, 6))
 sns.heatmap(df_features.corr(), annot=True, cmap='coolwarm', fmt='.2f')
 plt.title("Feature Matrix Correlation Heatmap")
 plt.tight_layout()
 plt.show()
 
 os.makedirs(os.path.dirname(OUTPUT_PATH), exist_ok=True)
-df_features.to_parquet(OUTPUT_PATH)
+df_features.to_csv(OUTPUT_PATH)
 print(f"\nSaved feature matrix: {df_features.shape}")
 print(f"Path: {OUTPUT_PATH}")
+
+# %%

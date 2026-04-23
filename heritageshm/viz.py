@@ -167,3 +167,70 @@ def plot_gap_availability(df, target_col, freq='D',
         _save_figure(fig, save_path, filename)
         
     plt.show()
+
+def plot_target_vs_proxies(df, target, proxies, save_plot=False, save_path='outputs/figures', filename='ts_target_vs_proxies', theme_kwargs=None):
+    if theme_kwargs is not None:
+        apply_theme(**theme_kwargs)
+        
+    fig, axes = plt.subplots(len(proxies), 1, figsize=(15, 4 * len(proxies)), sharex=True)
+    if len(proxies) == 1:
+        axes = [axes]
+
+    for ax, proxy in zip(axes, proxies):
+        # Plot proxy first on the bottom axis
+        color_proxy = 'tab:blue'
+        ax.plot(df.index, df[proxy], label=proxy, color=color_proxy, alpha=0.7, linewidth=1)
+        ax.set_ylabel(proxy, color=color_proxy)
+        ax.tick_params(axis='y', labelcolor=color_proxy)
+        
+        # Plot target second on the twin axis so it sits on top
+        ax2 = ax.twinx()
+        color_target = 'black'
+        ax2.plot(df.index, df[target], label=target, color=color_target, alpha=0.7, linewidth=1)
+        ax2.set_ylabel(target, color=color_target)
+        ax2.tick_params(axis='y', labelcolor=color_target)
+        
+        ax.set_title(f"{target} vs {proxy}")
+        ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    if save_plot:
+        _save_figure(fig, save_path, filename)
+    plt.show()
+
+def plot_cross_correlation_lags(lags, corrs_dict, optimal_lags_dict, target, save_plot=False, save_path='outputs/figures', filename='cross_correlation_lags', theme_kwargs=None):
+    if theme_kwargs is not None:
+        apply_theme(**theme_kwargs)
+        
+    fig, ax = plt.subplots(figsize=(10, 5))
+    for proxy, corrs in corrs_dict.items():
+        best_lag = optimal_lags_dict.get(proxy)
+        label = f"{proxy} ({best_lag}h lag)" if best_lag is not None else proxy
+        line, = ax.plot(lags, corrs, label=label)
+        
+        if best_lag is not None:
+            idx = list(lags).index(best_lag)
+            best_corr = corrs[idx]
+            ax.scatter([best_lag], [best_corr], color=line.get_color(), zorder=5)
+            
+    ax.set_title(f"Cross-Correlation w/ {target} across varying Lags")
+    ax.set_xlabel("Lag (Hours)")
+    ax.set_ylabel("Pearson Correlation (r)")
+    ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    if save_plot:
+        _save_figure(fig, save_path, filename)
+    plt.show()
+
+def plot_correlation_heatmap(df_features, title="Feature Matrix Correlation Heatmap", save_plot=False, save_path='outputs/figures', filename='correlation_heatmap', theme_kwargs=None):
+    if theme_kwargs is not None:
+        apply_theme(**theme_kwargs)
+        
+    fig, ax = plt.subplots(figsize=(8, 6))
+    sns.heatmap(df_features.corr(), annot=True, cmap='coolwarm', fmt='.2f', ax=ax)
+    ax.set_title(title)
+    plt.tight_layout()
+    if save_plot:
+        _save_figure(fig, save_path, filename)
+    plt.show()

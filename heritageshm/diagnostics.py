@@ -311,3 +311,65 @@ def test_signal_stationarity(df, cols, alpha=0.05):
         print(f"{col:50s}  ADF={adf_stat:8.4f}  p={p_value:.4e}  {'✓ I(0)' if is_stationary else '✗ I(1)'}")
 
     return pd.DataFrame(records).set_index('Variable')
+
+def get_longest_contiguous_block(df, target_col, expected_step='1h'):
+    """
+    Identifies the start and end timestamps of the longest contiguous 
+    non-missing block of the target variable.
+    
+    Parameters:
+    - df: DataFrame with a DatetimeIndex.
+    - target_col: Structural target column.
+    - expected_step: Target frequency string (default '1h').
+    
+    Returns:
+    - ref_start: Start timestamp of longest block.
+    - ref_end: End timestamp of longest block.
+    """
+    target_series = df[target_col].dropna()
+    expected_step_td = pd.Timedelta(expected_step)
+    
+    time_diffs = target_series.index.to_series().diff()
+    breaks = time_diffs[time_diffs > expected_step_td * 1.5].index
+
+    block_starts = [target_series.index[0]] + list(breaks)
+    block_ends   = list(breaks - expected_step_td) + [target_series.index[-1]]
+    block_lengths_h = [(e - s).total_seconds() / 3600 for s, e in zip(block_starts, block_ends)]
+
+    longest_idx = int(pd.Series(block_lengths_h).idxmax())
+    ref_start   = block_starts[longest_idx]
+    ref_end     = block_ends[longest_idx]
+    
+    print(f"Longest contiguous block : {ref_start} → {ref_end}")
+    print(f"Duration                 : {block_lengths_h[longest_idx]:.0f} h "
+          f"({block_lengths_h[longest_idx] / 24:.1f} days)")
+          
+    return ref_start, ref_end
+
+def screen_optimal_lags(df_diff, target, proxies, max_lag_h, lag_step):
+    """
+    Screens optimal thermal inertia lags across multiple proxies using shift_and_correlate.
+    
+    Returns:
+    - optimal_lags: dict mapping proxy name to optimal lag
+    - all_lags: list of lag tested
+    - corrs_dict: dict mapping proxy name to correlation array
+    """
+    optimal_lags = {}
+    corrs_dict = {}
+    all_lags = None
+    
+    for proxy in proxies:
+        lags, corrs = shift_and_correlate(df_diff, target, proxy, max_lag_h, lag_step)
+        if all_lags is None:
+            all_lags = lags
+            
+        max_idx = np.argmax(np.abs(corrs))
+        best_lag = lags[max_idx]
+        best_corr = corrs[max_idx]
+        
+        optimal_lags[proxy] = best_lag
+        corrs_dict[proxy] = corrs
+        print(f"{proxy}: Optimal Lag = {best_lag}h, r = {best_corr:.3f}")
+        
+    return optimal_lags, all_lags, corrs_dict

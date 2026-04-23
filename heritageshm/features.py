@@ -103,3 +103,22 @@ def calculate_moving_averages(df, proxy_col, windows=[6, 12, 24]):
         df_ma[col_name] = df_ma[proxy_col].rolling(window=window, min_periods=1).mean()
         
     return df_ma
+
+def build_optimal_feature_matrix(df_ref, target, optimal_lags, exclude_proxies=None):
+    """
+    Assembles the final feature matrix by keeping the target and shifting 
+    proxies according to their optimal lags.
+    """
+    if exclude_proxies is None:
+        exclude_proxies = []
+        
+    optimal_lags_filtered = {k: v for k, v in optimal_lags.items() if k not in exclude_proxies}
+    
+    df_features = df_ref[[target]].copy()
+    
+    for proxy, lag in optimal_lags_filtered.items():
+        col_name = f"{proxy}_lag{lag}"
+        df_features[col_name] = df_ref[proxy].shift(lag)
+        
+    df_features = df_features.dropna()
+    return df_features

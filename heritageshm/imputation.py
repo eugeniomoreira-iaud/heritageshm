@@ -171,3 +171,153 @@ def impute_gap_iterative(model, gap_idx, working_series, working_diff,
         prev_level = level_pred
 
     return pd.Series(predictions)
+
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+
+def get_synthetic_gap_window(df, target_col, gap_duration_h):
+    """
+    Finds the longest contiguous block of observed data and extracts a synthetic 
+    gap window from its center.
+    """
+    obs_runs  = (~df[target_col].isna()).astype(int)
+    run_ends  = df.index[(obs_runs == 1) & (obs_runs.shift(-1, fill_value=0) == 0)]
+    run_starts= df.index[(obs_runs == 1) & (obs_runs.shift(1,  fill_value=0) == 0)]
+    run_lengths = [(e - s).total_seconds()/3600 for s, e in zip(run_starts, run_ends)]
+    
+    longest_run_idx = int(np.argmax(run_lengths))
+    longest_start   = run_starts[longest_run_idx]
+    longest_end     = run_ends[longest_run_idx]
+    
+    run_idx     = pd.date_range(longest_start, longest_end, freq="1h")
+    mid         = len(run_idx) // 2
+    gap_idx_val = run_idx[mid - gap_duration_h//2 : mid + gap_duration_h//2]
+    
+    return longest_start, longest_end, run_lengths[longest_run_idx], gap_idx_val
+
+def evaluate_synthetic_gap(y_true, y_pred):
+    """
+    Evaluates synthetic gap point predictions against the ground truth.
+    """
+    valid_mask = y_pred.notna() & y_true.notna()
+    y_true_sc  = y_true[valid_mask]
+    y_pred_sc  = y_pred[valid_mask]
+    
+    rmse = np.sqrt(mean_squared_error(y_true_sc, y_pred_sc))
+    mae  = mean_absolute_error(y_true_sc, y_pred_sc)
+    r2   = r2_score(y_true_sc, y_pred_sc)
+    bias = float((y_pred_sc - y_true_sc).mean())
+    maxe = float((y_pred_sc - y_true_sc).abs().max())
+    
+    return valid_mask, y_true_sc, y_pred_sc, rmse, mae, r2, bias, maxe
+
+def get_bootstrap_uncertainty(n_bootstrap, random_seed, X_train, y_train, gap_idx_val, working_full, working_full_diff, df_full, proxy_lags, ar_lags, target, target_diff_col, xgb_params):
+    """
+    Runs iterative reconstruction over a gap using resampled bootstrap models 
+    to estimate structural uncertainty in the predictions.
+    """
+    from xgboost import XGBRegressor
+    boot_preds = np.full((n_bootstrap, len(gap_idx_val)), np.nan)
+
+    for b in range(n_bootstrap):
+        rng      = np.random.default_rng(random_seed + b)
+        boot_idx = rng.choice(len(X_train), size=len(X_train), replace=True)
+        X_b      = X_train.iloc[boot_idx]
+        y_b      = y_train.iloc[boot_idx]
+        m_b      = XGBRegressor(**xgb_params)
+        m_b.fit(X_b, y_b, verbose=False)
+
+        working_b      = working_full.copy()
+        working_b_diff = working_full_diff.copy()
+        working_b.loc[gap_idx_val]      = np.nan
+        working_b_diff.loc[gap_idx_val] = np.nan
+
+        preds_b = impute_gap_iterative(
+            m_b, gap_idx_val,
+            working_b, working_b_diff,
+            df_full, proxy_lags, ar_lags,
+            target, target_diff_col
+        )
+        boot_preds[b, :] = preds_b.values
+        if (b + 1) % 10 == 0:
+            print(f"  Bootstrap {b+1}/{n_bootstrap} done")
+            
+    boot_mean = np.nanmean(boot_preds, axis=0)
+    boot_std  = np.nanstd(boot_preds,  axis=0)
+    return boot_mean, boot_std
+
+def calibrate_uncertainty(boot_std, residual_std):
+    """
+    Calibrates the raw bootstrap std to accurately reflect true prediction errors using a conformal scale factor.
+    """
+    mean_boot_std   = np.nanmean(boot_std[boot_std > 0])
+    conformal_scale = residual_std / mean_boot_std if mean_boot_std > 0 else 1.0
+    boot_std_cal    = boot_std * conformal_scale
+    return mean_boot_std, conformal_scale, boot_std_cal
+
+def impute_all_gaps_with_uncertainty(model, gap_blocks, working_full, working_full_diff, df_full, proxy_lags, ar_lags, target, target_diff, n_bootstrap, random_seed, X_train, y_train, xgb_params, conformal_scale):
+    """
+    High-level wrapper that iteratively loops over all gap blocks, performing point imputation 
+    and generating bootstrapped confidence bounds calibrated for each gap.
+    """
+    from xgboost import XGBRegressor
+    imputed_flag = pd.Series(False, index=df_full.index)
+    imputed_std  = pd.Series(np.nan, index=df_full.index)
+    log_rows = []
+
+    for gap_num, gap_row in gap_blocks.iterrows():
+        gap_idx = pd.date_range(gap_row["start"], gap_row["end"], freq="1h")
+
+        preds_gap = impute_gap_iterative(
+            model, gap_idx,
+            working_full, working_full_diff,
+            df_full, proxy_lags, ar_lags,
+            target, target_diff
+        )
+
+        valid_preds = preds_gap.dropna()
+        imputed_flag.loc[valid_preds.index] = True
+
+        boot_gap = np.full((n_bootstrap, len(gap_idx)), np.nan)
+        for b in range(n_bootstrap):
+            rng      = np.random.default_rng(random_seed + b)
+            boot_idx = rng.choice(len(X_train), size=len(X_train), replace=True)
+            m_b      = XGBRegressor(**xgb_params)
+            m_b.fit(X_train.iloc[boot_idx], y_train.iloc[boot_idx], verbose=False)
+            
+            working_b      = working_full.copy()
+            working_b_diff = working_full_diff.copy()
+            preds_b = impute_gap_iterative(
+                m_b, gap_idx,
+                working_b, working_b_diff,
+                df_full, proxy_lags, ar_lags,
+                target, target_diff
+            )
+            boot_gap[b, :] = preds_b.values
+
+        gap_std_raw = np.nanstd(boot_gap, axis=0)
+        gap_std_cal = gap_std_raw * conformal_scale
+        imputed_std.loc[gap_idx] = gap_std_cal
+
+        mean_sigma    = (
+            round(float(np.nanmean(gap_std_cal)), 4)
+            if not np.all(np.isnan(gap_std_cal)) else None
+        )
+        imputed_count = valid_preds.shape[0]
+
+        log_rows.append({
+            "Gap #":        gap_num + 1,
+            "Start":        gap_row["start"].strftime("%Y-%m-%d %H:%M"),
+            "End":          gap_row["end"].strftime("%Y-%m-%d %H:%M"),
+            "Duration (h)": int(gap_row["duration_h"]),
+            "Imputed (h)":  imputed_count,
+            "Not imputed":  int(gap_row["duration_h"]) - imputed_count,
+            "Mean σ (cal)": mean_sigma if mean_sigma is not None else "—",
+        })
+
+        if (gap_num + 1) % 50 == 0 or gap_num < 5:
+            print(f"Gap {gap_num+1:3d}/{len(gap_blocks)} | "
+                  f"{int(gap_row['duration_h']):5.0f} h | "
+                  f"imputed {imputed_count:5d} h | "
+                  f"σ_cal = {mean_sigma if mean_sigma else '—'}")
+                  
+    return working_full, imputed_flag, imputed_std, pd.DataFrame(log_rows)

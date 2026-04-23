@@ -43,6 +43,7 @@ apply_theme(context='notebook')
 # ── Paths ──────────────────────────────────────────────────────────────────────
 DATA_PATH   = "data/interim/aligned/st02_aligned_dataset.csv"
 OUTPUT_PATH = "data/processed/feature_matrix.csv"
+LAGS_PATH   = "data/processed/optimal_lags.csv"
 FIG_PATH    = "outputs/figures/"
 
 # %% [markdown]
@@ -171,5 +172,9 @@ os.makedirs(os.path.dirname(OUTPUT_PATH), exist_ok=True)
 df_features.to_csv(OUTPUT_PATH)
 print(f"\nSaved feature matrix: {df_features.shape}")
 print(f"Path: {OUTPUT_PATH}")
+
+final_lags = {p: l for p, l in optimal_lags.items() if p not in EXCLUDE_FROM_FEATURES}
+pd.Series(final_lags, name="optimal_lag").to_csv(LAGS_PATH, index_label="proxy")
+print(f"Saved optimal lags: {LAGS_PATH}")
 
 # %%

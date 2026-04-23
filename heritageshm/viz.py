@@ -234,3 +234,141 @@ def plot_correlation_heatmap(df_features, title="Feature Matrix Correlation Heat
     if save_plot:
         _save_figure(fig, save_path, filename)
     plt.show()
+
+def plot_gap_overview(df_full, target, gap_blocks, save_plot=False, save_path='outputs/figures', filename='gap_overview', theme_kwargs=None):
+    if theme_kwargs: apply_theme(**theme_kwargs)
+    import matplotlib.patches as mpatches
+    fig, ax = plt.subplots(figsize=(16, 4))
+    ax.plot(df_full.index, df_full[target], color="black", linewidth=0.6, label="Observed")
+    for _, row in gap_blocks.iterrows():
+        ax.axvspan(row["start"], row["end"], color="crimson", alpha=0.25, linewidth=0)
+    obs_patch = mpatches.Patch(color="black",  label="Observed")
+    gap_patch = mpatches.Patch(color="crimson", alpha=0.4, label="Gap (missing)")
+    ax.legend(handles=[obs_patch, gap_patch], loc="upper left")
+    ax.set_title("Inclinometer Series — Observed Data and Gap Regions")
+    ax.set_xlabel("Date")
+    ax.set_ylabel(f"{target} (µrad)")
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    if save_plot: _save_figure(fig, save_path, filename)
+    plt.show()
+
+def plot_feature_importance(model, save_plot=False, save_path='outputs/figures', filename='feature_importance', theme_kwargs=None):
+    if theme_kwargs: apply_theme(**theme_kwargs)
+    importance = pd.Series(
+        model.get_booster().get_score(importance_type="gain"),
+        name="Gain"
+    ).sort_values(ascending=True)
+    fig, ax = plt.subplots(figsize=(8, max(4, len(importance) * 0.38)))
+    importance.plot(kind="barh", ax=ax, color="steelblue", edgecolor="white")
+    ax.set_title("XGBoost Feature Importance (Gain)")
+    ax.set_xlabel("Gain")
+    ax.grid(True, axis="x", alpha=0.3)
+    plt.tight_layout()
+    if save_plot: _save_figure(fig, save_path, filename)
+    plt.show()
+
+def plot_synthetic_validation(df_full, target, gap_idx_val, y_pred_sc, rmse, valid_mask, gap_duration_h, save_plot=False, save_path='outputs/figures', filename='synthetic_gap_validation', theme_kwargs=None):
+    if theme_kwargs: apply_theme(**theme_kwargs)
+    context_start = gap_idx_val[0]  - pd.Timedelta(days=7)
+    context_end   = gap_idx_val[-1] + pd.Timedelta(days=7)
+    context_mask  = (df_full.index >= context_start) & (df_full.index <= context_end)
+
+    fig, ax = plt.subplots(figsize=(14, 4))
+    ax.fill_between(gap_idx_val[valid_mask],
+                    y_pred_sc - rmse, y_pred_sc + rmse,
+                    color="steelblue", alpha=0.25, label=f"±1 RMSE band (±{rmse:.2f})")
+    ax.axvspan(gap_idx_val[0], gap_idx_val[-1], color="salmon", alpha=0.12, linewidth=0)
+    ax.plot(df_full.index[context_mask], df_full[target][context_mask],
+            color="black", linewidth=0.9, label="Observed")
+    ax.plot(gap_idx_val[valid_mask], y_pred_sc,
+            color="steelblue", linewidth=1.4, label="XGBoost imputed (iterative, Δy)")
+    ax.set_title(f"Synthetic Gap Validation — Observed vs. Imputed ({gap_duration_h//24}-day gap)")
+    ax.set_xlabel("Date")
+    ax.set_ylabel(f"{target} (µrad)")
+    ax.legend(loc="upper left")
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    if save_plot: _save_figure(fig, save_path, filename)
+    plt.show()
+
+def plot_residual_distribution(residuals_val, bias, save_plot=False, save_path='outputs/figures', filename='residual_distribution', theme_kwargs=None):
+    from scipy.stats import gaussian_kde
+    if theme_kwargs: apply_theme(**theme_kwargs)
+    fig, ax = plt.subplots(figsize=(7, 4))
+    ax.hist(residuals_val, bins=40, density=True, color="steelblue", edgecolor="white", alpha=0.7)
+    xr = np.linspace(residuals_val.min(), residuals_val.max(), 300)
+    ax.plot(xr, gaussian_kde(residuals_val)(xr), color="steelblue", linewidth=2)
+    ax.axvline(0,    color="black",   linestyle="--", linewidth=1.2, label="Zero bias")
+    ax.axvline(bias, color="crimson", linestyle="--", linewidth=1.2, label=f"Mean bias = {bias:.3f}")
+    ax.set_title("Residual Distribution — Synthetic Gap (imputed − observed)")
+    ax.set_xlabel("Residual (µrad)")
+    ax.set_ylabel("Density")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    if save_plot: _save_figure(fig, save_path, filename)
+    plt.show()
+
+def plot_bootstrap_uncertainty(df_full, target, gap_idx_val, boot_mean, boot_std_cal, y_true_val, n_bootstrap, save_plot=False, save_path='outputs/figures', filename='bootstrap_uncertainty', theme_kwargs=None):
+    if theme_kwargs: apply_theme(**theme_kwargs)
+    context_start = gap_idx_val[0]  - pd.Timedelta(days=7)
+    context_end   = gap_idx_val[-1] + pd.Timedelta(days=7)
+    context_mask  = (df_full.index >= context_start) & (df_full.index <= context_end)
+
+    fig, ax = plt.subplots(figsize=(14, 4))
+    ax.axvspan(gap_idx_val[0], gap_idx_val[-1], color="salmon", alpha=0.12, linewidth=0)
+    ax.fill_between(gap_idx_val, boot_mean - 2*boot_std_cal, boot_mean + 2*boot_std_cal,
+                    color="steelblue", alpha=0.20, label="±2σ (calibrated)")
+    ax.fill_between(gap_idx_val, boot_mean - boot_std_cal,   boot_mean + boot_std_cal,
+                    color="steelblue", alpha=0.35, label="±1σ (calibrated)")
+    ax.plot(df_full.index[context_mask], df_full[target][context_mask],
+            color="black", linewidth=0.9, label="Observed")
+    ax.plot(gap_idx_val, y_true_val, color="black", linewidth=0.8,
+            linestyle="--", alpha=0.6, label="Ground truth (masked)")
+    ax.plot(gap_idx_val, boot_mean, color="steelblue", linewidth=1.4,
+            label="Bootstrap mean prediction")
+    ax.set_title(f"Bootstrap Uncertainty Envelope — {n_bootstrap} resamples (conformal calibration)")
+    ax.set_xlabel("Date")
+    ax.set_ylabel(f"{target} (µrad)")
+    ax.legend(loc="upper left", fontsize=8)
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    if save_plot: _save_figure(fig, save_path, filename)
+    plt.show()
+
+def plot_full_reconstruction(df_full, target, working_full, imputed_flag, imputed_std, save_plot=False, save_path='outputs/figures', filename='full_reconstruction', theme_kwargs=None):
+    if theme_kwargs: apply_theme(**theme_kwargs)
+    fig, ax = plt.subplots(figsize=(16, 4))
+    ax.plot(df_full.index, df_full[target],
+            color="black", linewidth=0.6, label="Observed", zorder=3)
+    imp_idx = imputed_flag[imputed_flag].index
+    ax.fill_between(
+        imp_idx,
+        (working_full.loc[imp_idx] - imputed_std.loc[imp_idx]).values,
+        (working_full.loc[imp_idx] + imputed_std.loc[imp_idx]).values,
+        color="steelblue", alpha=0.3, label="±1σ uncertainty"
+    )
+    ax.scatter(imp_idx, working_full.loc[imp_idx],
+               color="steelblue", s=1.2, zorder=2, label="XGBoost imputed")
+    ax.set_title("Full Reconstructed Inclinometer Series — Observed + Imputed")
+    ax.set_xlabel("Date")
+    ax.set_ylabel(f"{target} (µrad)")
+    ax.legend(loc="upper left", markerscale=4)
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    if save_plot: _save_figure(fig, save_path, filename)
+    plt.show()
+
+def plot_uncertainty_profile(df_full, imputed_std, save_plot=False, save_path='outputs/figures', filename='uncertainty_profile', theme_kwargs=None):
+    if theme_kwargs: apply_theme(**theme_kwargs)
+    fig, ax = plt.subplots(figsize=(16, 3))
+    ax.fill_between(df_full.index, 0, imputed_std.fillna(0),
+                    color="steelblue", alpha=0.6)
+    ax.set_title("Calibrated Uncertainty Profile — σ per Imputed Hour")
+    ax.set_xlabel("Date")
+    ax.set_ylabel("σ (µrad)")
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    if save_plot: _save_figure(fig, save_path, filename)
+    plt.show()

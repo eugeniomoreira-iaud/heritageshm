@@ -13,7 +13,7 @@ This project presents a generic, two-phase workflow that moves from raw sensor c
 **Phase A: Historical Model Building**
 1. **Data Preprocessing & Gap Diagnosis:** Synchronization of on-site structural sensors with external environmental proxy data (e.g., satellite reanalysis or local weather stations). Includes gap taxonomy classification (MCAR, MAR, MNAR).
 2. **Physics-Informed Regressor Selection:** Engle-Granger cointegration testing to validate the long-run equilibrium between structural response and environmental proxies, followed by the generation of thermal-lag features.
-3. **Compact Imputation Benchmark:** Evaluation of baseline and advanced gap-filling models (Gaussian Process Regression, Bayesian Dynamic Linear Models, attention-based BiLSTM, and XGBoost) to reconstruct contiguous data outages while preserving structural interpretability.
+3. **Compact Imputation Benchmark:** Implementation of an XGBoost virtual sensing model with conformal bootstrap calibration to reconstruct contiguous data outages while preserving structural interpretability.
 
 **Phase B: Operational Monitoring**
 4. **Grey-Box Decomposition:** Separation of structural trend, environmental seasonality, and structural residuals using `NeuralProphet` (combining autoregressive memory with exogenous environmental regressors).

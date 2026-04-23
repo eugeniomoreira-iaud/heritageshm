@@ -19,8 +19,8 @@ The analysis is driven by a sequential Jupyter Notebook pipeline. To run the ful
 1. `00_Sensor_Preprocessing.ipynb` - Raw data extraction and cleaning.
 2. `01_Data_Quality_and_Gaps.ipynb` - Proxy alignment and gap characterization.
 3. `02_Proxy_Validation_and_Lags.ipynb` - Thermal lag screening and feature engineering.
-4. `03_Imputation_Benchmark.ipynb` - Comparison of gap-filling models (GPR, BDLM, BiLSTM, XGBoost).
-5. `04_GreyBox_shutdown_and_Monitoring.ipynb` - NeuralProphet decomposition and anomaly detection.
+4. `03_Imputation_Benchmark.ipynb` - XGBoost virtual sensing and uncertainty quantification.
+5. `04_GreyBox_Decomposition_and_Monitoring.ipynb` - NeuralProphet decomposition and anomaly detection.
 
 To launch the interactive environment:
 ```bash
@@ -58,6 +58,6 @@ Paired files:
 - `01_Data_Quality_and_Gaps.ipynb` ↔ `01_Data_Quality_and_Gaps.py`
 - `02_Proxy_Validation_and_Lags.ipynb` ↔ `02_Proxy_Validation_and_Lags.py`
 - `03_Imputation_Benchmark.ipynb` ↔ `03_Imputation_Benchmark.py`
-- `04_GreyBox_shutdown_and_Monitoring.ipynb` ↔ `04_GreyBox_Decomposition_and_Monitoring.py`
+- `04_GreyBox_Decomposition_and_Monitoring.ipynb` ↔ `04_GreyBox_Decomposition_and_Monitoring.py`
 
 When making changes, edit the `.py` files directly. The notebook synchronization will be handled manually later.

@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.16.7
+#       jupytext_version: 1.18.1
 #   kernelspec:
 #     display_name: neuralprophet_env
 #     language: python
@@ -52,6 +52,7 @@ warnings.filterwarnings("ignore")
 
 sys.path.insert(0, os.path.abspath('..'))
 from heritageshm.viz import apply_theme
+from heritageshm.imputation import get_gap_blocks, build_feature_row, build_training_matrix, impute_gap_iterative
 
 apply_theme(context='notebook')
 
@@ -127,16 +128,6 @@ print(f"  Target missing AND proxy also missing : {both_missing.sum()} h "
 print(f"  Target missing AND proxy available    : {proxy_ok_gap.sum()} h "
       f"({proxy_ok_gap.sum()/target_missing.sum()*100:.1f}% of gaps)")
 
-# %%
-def get_gap_blocks(series):
-    is_gap    = series.isna()
-    gap_start = series.index[is_gap & ~is_gap.shift(1,  fill_value=False)]
-    gap_end   = series.index[is_gap & ~is_gap.shift(-1, fill_value=False)]
-    blocks    = pd.DataFrame({"start": gap_start, "end": gap_end})
-    blocks["duration_h"] = (
-        (blocks["end"] - blocks["start"]).dt.total_seconds() / 3600 + 1
-    )
-    return blocks.reset_index(drop=True)
 
 gap_blocks = get_gap_blocks(df_full[TARGET])
 print(f"\nDetected {len(gap_blocks)} gap blocks")
@@ -166,85 +157,10 @@ plt.show()
 # ## Step 2 · Feature Engineering (training matrix on observed data only)
 
 # %%
-# ── CHANGED: build_feature_row now accepts working_diff ─────────────────────
-# AR lags are computed on the DIFFERENCED target (working_diff), not the level.
-# Proxy values and time encodings are unchanged.
-def build_feature_row(ts, working_series, working_diff, df_source,
-                       proxy_lags, ar_lags, target_diff_col):
-    """
-    Build a single-row feature dict for timestamp `ts`.
-
-    - Proxy values    : always from df_source (original dataset, never imputed).
-    - AR lags         : from working_diff (first differences of the running
-                        reconstructed level — includes Δy of prior predictions
-                        inside gaps).
-    - Time encodings  : derived from ts directly.
-
-    Note: working_series is no longer used for AR lags but is kept as an
-    argument to allow callers to optionally inspect the level series.
-    """
-    row = {}
-
-    # Proxy regressors at their validated optimal lags
-    for proxy, lag in proxy_lags.items():
-        lag_ts = ts - pd.Timedelta(hours=lag)
-        row[f"{proxy}_lag{lag}"] = (
-            df_source[proxy].get(lag_ts, np.nan)
-            if lag_ts in df_source.index else np.nan
-        )
-
-    # Cyclic time encodings
-    row["hour_sin"]  = np.sin(2 * np.pi * ts.hour / 24)
-    row["hour_cos"]  = np.cos(2 * np.pi * ts.hour / 24)
-    row["doy_sin"]   = np.sin(2 * np.pi * ts.dayofyear / 365.25)
-    row["doy_cos"]   = np.cos(2 * np.pi * ts.dayofyear / 365.25)
-    row["month_sin"] = np.sin(2 * np.pi * ts.month / 12)
-    row["month_cos"] = np.cos(2 * np.pi * ts.month / 12)
-
-    # AR lags on the DIFFERENCED target
-    for lag in ar_lags:
-        lag_ts = ts - pd.Timedelta(hours=lag)
-        row[f"{target_diff_col}_lag{lag}"] = (
-            working_diff.get(lag_ts, np.nan)
-            if lag_ts in working_diff.index else np.nan
-        )
-
-    return row
-
-
-# ── CHANGED: build_training_matrix uses TARGET_DIFF as the shift source ─────
-def build_training_matrix(df, proxy_lags, ar_lags, target_diff_col):
-    """
-    Build the vectorised training feature matrix.
-    AR lags are computed on target_diff_col (Δy), not the level.
-    Used only for training — iterative prediction uses build_feature_row.
-    """
-    X = pd.DataFrame(index=df.index)
-
-    # Proxy regressors at optimal lags
-    for proxy, lag in proxy_lags.items():
-        X[f"{proxy}_lag{lag}"] = df[proxy].shift(lag)
-
-    # Cyclic time encodings
-    X["hour_sin"]  = np.sin(2 * np.pi * df.index.hour / 24)
-    X["hour_cos"]  = np.cos(2 * np.pi * df.index.hour / 24)
-    X["doy_sin"]   = np.sin(2 * np.pi * df.index.dayofyear / 365.25)
-    X["doy_cos"]   = np.cos(2 * np.pi * df.index.dayofyear / 365.25)
-    X["month_sin"] = np.sin(2 * np.pi * df.index.month / 12)
-    X["month_cos"] = np.cos(2 * np.pi * df.index.month / 12)
-
-    # AR lags on the DIFFERENCED target
-    for lag in ar_lags:
-        X[f"{target_diff_col}_lag{lag}"] = df[target_diff_col].shift(lag)
-
-    return X
-
-
-# ── CHANGED: y_full is now the differenced target ───────────────────────────
 X_full = build_training_matrix(df_full, PROXY_LAGS, AR_LAGS, TARGET_DIFF)
 y_full = df_full[TARGET_DIFF]   # model predicts Δy, not level
 
-# Training mask: rows where both X and y are fully observed
+#Training mask: rows where both X and y are fully observed
 train_mask = y_full.notna() & X_full.notna().all(axis=1)
 X_train    = X_full[train_mask]
 y_train    = y_full[train_mask]
@@ -252,7 +168,7 @@ y_train    = y_full[train_mask]
 print(f"Training samples : {len(X_train)}")
 print(f"Feature columns  : {X_full.shape[1]}")
 
-# Print feature list
+#Print feature list
 feature_types = []
 for col in X_full.columns:
     if TARGET_DIFF in col:                                      # ── CHANGED
@@ -344,82 +260,6 @@ tr_mask_v = y_val_tr.notna() & X_val_tr.notna().all(axis=1)
 model_val = XGBRegressor(**XGB_PARAMS)
 model_val.fit(X_val_tr[tr_mask_v], y_val_tr[tr_mask_v], verbose=False)
 
-# %%
-# ── CHANGED: impute_gap_iterative — differenced domain with cumsum reconstruction
-def impute_gap_iterative(model, gap_idx, working_series, working_diff,
-                          df_source, proxy_lags, ar_lags,
-                          target_col, target_diff_col):
-    """
-    Iterative one-step-ahead imputation in the first-difference domain.
-
-    The model predicts Δŷ_t = y_t − y_{t-1}.
-    The level is reconstructed step by step as:
-        ŷ_t = ŷ_{t-1} + Δŷ_t
-    seeded from the last observed value immediately before the gap.
-
-    This eliminates systematic level bias: the reconstruction is structurally
-    anchored to the last real observation and drifts only as a zero-mean
-    random walk (cumulative sum of prediction errors).
-
-    Parameters
-    ----------
-    working_series : pd.Series
-        Running level series (observed + prior imputed values).
-        Updated in-place with each predicted level.
-    working_diff : pd.Series
-        Running first-difference series.
-        Updated in-place with each predicted Δy.
-        Used by build_feature_row for AR lags of Δy.
-    df_source : pd.DataFrame
-        Original dataset — used exclusively for proxy values.
-    target_col : str
-        Name of the level target column (for seed lookup).
-    target_diff_col : str
-        Name of the differenced target column (for AR feature names).
-
-    Returns
-    -------
-    pd.Series of reconstructed level predictions indexed by gap_idx.
-    Timestamps where proxy data is unavailable are returned as NaN.
-    """
-    predictions = {}
-
-    # ── Seed: last observed level before the gap ─────────────────────────────
-    prev_level = np.nan
-    for lookback in range(1, 49):
-        seed_ts  = gap_idx[0] - pd.Timedelta(hours=lookback)
-        seed_val = working_series.get(seed_ts, np.nan)
-        if not np.isnan(seed_val):
-            prev_level = seed_val
-            break
-
-    if np.isnan(prev_level):
-        # No observed seed within 48 h — cannot anchor; return all NaN
-        return pd.Series({ts: np.nan for ts in gap_idx})
-
-    # ── Iterative prediction ──────────────────────────────────────────────────
-    for ts in gap_idx:
-        row  = build_feature_row(ts, working_series, working_diff,
-                                  df_source, proxy_lags, ar_lags,
-                                  target_diff_col)
-        Xrow = pd.DataFrame([row])
-
-        if Xrow.isna().any(axis=1).values[0]:
-            predictions[ts] = np.nan
-            # Do not update prev_level — seed remains at last valid value
-            continue
-
-        delta_pred = float(model.predict(Xrow)[0])
-        level_pred = prev_level + delta_pred
-
-        # Write back to both working series
-        working_series[ts] = level_pred
-        working_diff[ts]   = delta_pred
-
-        predictions[ts] = level_pred
-        prev_level      = level_pred
-
-    return pd.Series(predictions)
 
 
 # ── CHANGED: validation call now initialises working_diff ───────────────────

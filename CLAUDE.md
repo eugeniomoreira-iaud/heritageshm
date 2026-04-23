@@ -42,8 +42,22 @@ The `heritageshm` package contains the functional logic:
 
 ### Data Flow
 1. **Raw Data**: Located in `data/raw/sensor/` (.adc) and `data/raw/proxies/` (.csv).
-2. **Interim Data**: Cleaned/aligned datasets stored in `data/interto/sensor/` and `data/interim/aligned/`.
+2. **Interim Data**: Cleaned/aligned datasets stored in `data/interim/sensor/` and `data/interim/aligned/`.
 3. **Processed Data**: Final feature matrices and imputed series in `data/processed/`.
 4. **Outputs**: Plots in `outputs/figures/`, metrics in `outputs/tables/`, and models in `outputs/models/`.
 
 *Note: `data/` and `outputs/` are large and should not be committed to Git.*
+
+## Code Style and Conventions
+
+### Paired .py Files
+Jupyter Notebooks are now paired with human-readable `.py` files using Jupytext. These `.py` files are the primary source for code review and editing. Always refer to these files when making changes to the pipeline logic.
+
+Paired files:
+- `00_Sensor_Preprocessing.ipynb` ↔ `00_Sensor_Preprocessing.py`
+- `01_Data_Quality_and_Gaps.ipynb` ↔ `01_Data_Quality_and_Gaps.py`
+- `02_Proxy_Validation_and_Lags.ipynb` ↔ `02_Proxy_Validation_and_Lags.py`
+- `03_Imputation_Benchmark.ipynb` ↔ `03_Imputation_Benchmark.py`
+- `04_GreyBox_shutdown_and_Monitoring.ipynb` ↔ `04_GreyBox_Decomposition_and_Monitoring.py`
+
+When making changes, edit the `.py` files directly. The notebook synchronization will be handled manually later.

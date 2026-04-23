@@ -50,8 +50,13 @@ The `heritageshm` package contains the functional logic:
 
 ## Code Style and Conventions
 
-### Paired .py Files
-Jupyter Notebooks are now paired with human-readable `.py` files using Jupytext. These `.py` files are the primary source for code review and editing. Always refer to these files when making changes to the pipeline logic.
+### Jupyter Notebook and .py File Pairing (Crucial for AI Agents)
+In this repository, every Jupyter Notebook (`.ipynb`) is strictly paired with a human-readable Python file (`.py`) utilizing Jupytext (in the `py:percent` format). 
+
+**CRITICAL INSTRUCTION FOR LLMS AND AI AGENTS:**
+1. **Never edit `.ipynb` files directly.** The underlying JSON structures are heavily prone to validation errors and corruption during automated line-by-line edits.
+2. Whenever the user requests an analysis, review, or code modification involving a "notebook", you MUST perform all your reading, reasoning, and file modifications exclusively on its corresponding `.py` pair.
+3. Treat the `.py` file as the absolute ground truth for logic. The user will handle syncing your `.py` edits back to the interactive `.ipynb` format locally.
 
 Paired files:
 - `00_Sensor_Preprocessing.ipynb` ↔ `00_Sensor_Preprocessing.py`
@@ -59,5 +64,3 @@ Paired files:
 - `02_Proxy_Validation_and_Lags.ipynb` ↔ `02_Proxy_Validation_and_Lags.py`
 - `03_Imputation_Benchmark.ipynb` ↔ `03_Imputation_Benchmark.py`
 - `04_GreyBox_Decomposition_and_Monitoring.ipynb` ↔ `04_GreyBox_Decomposition_and_Monitoring.py`
-
-When making changes, edit the `.py` files directly. The notebook synchronization will be handled manually later.

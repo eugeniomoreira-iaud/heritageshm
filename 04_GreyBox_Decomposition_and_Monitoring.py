@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.16.7
+#       jupytext_version: 1.18.1
 #   kernelspec:
 #     display_name: heritageshm_env
 #     language: python
@@ -290,7 +290,7 @@ fig, ax = plt.subplots(figsize=(16, 4))
 ax.plot(df_pred.index, df_pred['y'],     color='black',     linewidth=0.6, label='Observed / Imputed', zorder=3)
 ax.plot(df_pred.index, df_pred['yhat1'], color='steelblue', linewidth=1.0, label='NeuralProphet fit',  zorder=2)
 ax.set_title("NeuralProphet Grey-Box Fit — Observed vs. Fitted")
-ax.set_xlabel("Date"); ax.set_ylabel(f"{TARGET} (µrad)")
+ax.set_xlabel("Date"); ax.set_ylabel(f"{TARGET} (mdeg)")
 ax.legend(loc='upper left'); ax.grid(True, alpha=0.3)
 sns.despine(); plt.tight_layout()
 fig.savefig(os.path.join(FIG_PATH, "04_02_observed_vs_fitted.png"), dpi=300, bbox_inches='tight')
@@ -386,7 +386,7 @@ ax.plot(xr, gaussian_kde(res_vals)(xr), color='steelblue', linewidth=2, label='K
 ax.plot(xr, norm.pdf(xr, res_vals.mean(), res_vals.std()),
         color='crimson', linewidth=1.5, linestyle='--', label='Normal')
 ax.axvline(0, color='black', linestyle='--', linewidth=1)
-ax.set_title("Residual Distribution"); ax.set_xlabel("Residual (µrad)"); ax.set_ylabel("Density")
+ax.set_title("Residual Distribution"); ax.set_xlabel("Residual (mdeg)"); ax.set_ylabel("Density")
 ax.legend(); ax.grid(True, alpha=0.3); sns.despine(ax=ax)
 
 # Right: ACF of residuals (manual computation)
@@ -456,7 +456,7 @@ ax.axvspan(pd.Timestamp(REF_START), pd.Timestamp(REF_END),
            color='green', alpha=0.06, label='Reference period')
 
 ax.set_title(f"EWMA Control Chart (λ={EWMA_LAMBDA}, L={EWMA_L})")
-ax.set_xlabel("Date"); ax.set_ylabel("EWMA statistic (µrad)")
+ax.set_xlabel("Date"); ax.set_ylabel("EWMA statistic (mdeg)")
 ax.legend(loc='upper left', fontsize=8); ax.grid(True, alpha=0.3)
 sns.despine(); plt.tight_layout()
 fig.savefig(os.path.join(FIG_PATH, "04_05_ewma_chart.png"), dpi=300, bbox_inches='tight')
@@ -500,7 +500,7 @@ for ts in alarm_joint_series[alarm_joint_series].index:
     ax.axvspan(ts, ts + pd.Timedelta(hours=1), color='crimson', alpha=0.3, linewidth=0)
 ax.axvspan(pd.Timestamp(REF_START), pd.Timestamp(REF_END),
            color='green', alpha=0.06, label='Reference period')
-ax.set_ylabel("Structural Residual (µrad)"); ax.legend(loc='upper left', fontsize=8)
+ax.set_ylabel("Structural Residual (mdeg)"); ax.legend(loc='upper left', fontsize=8)
 ax.set_title("Structural Residuals with Joint EWMA+CUSUM Alarm Periods (red)")
 ax.grid(True, alpha=0.2); sns.despine(ax=ax)
 

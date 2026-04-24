@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.16.7
+#       jupytext_version: 1.18.1
 #   kernelspec:
 #     display_name: neuralprophet_env
 #     language: python
@@ -16,59 +16,65 @@
 # %% [markdown]
 # # Notebook 00 · Sensor Preprocessing
 #
-# This notebook handles raw data extraction specifically for on-site sensors:
+# **Goal:** Extract, clean, and temperature-compensate raw on-site sensor data.
 #
-# 1. **File Inspection** — Examine an unknown raw sensor file before loading
-# 2. **Data Loading** — Read all raw sensor files from `/data/raw/sensor/`
-# 3. **Signal Cleaning** — Remove power-loss rows and physical outliers (optional)
-# 4. **Save** — Export the cleaned, standardized dataset to `/data/interim/sensor/`
-#
+# **Steps:**
+# 1. **File Inspection** — Examine one raw file before loading to confirm delimiter and column layout.
+# 2. **Data Loading** — Read all raw sensor files from `/data/raw/sensor/`.
+# 3. **Signal Cleaning and Compensation** — Remove power-loss rows, filter physical outliers,
+#    and apply the on-board temperature compensation coefficient.
+# 4. **Compensation Visualisation** — Plot raw vs. compensated signal and the applied correction.
+# 5. **Save** — Export cleaned, standardized datasets to `/data/interim/sensor/`.
+
+# %% [markdown]
+# ## Import libraries
 
 # %%
 import sys
 import os
-import pandas as pd
-
+import glob
 sys.path.insert(0, os.path.abspath('..'))
 
 from heritageshm.dataloader import inspect_raw_file, load_sensor_directory, organize_sensor_data
-from heritageshm.preprocessing import clean_signal, apply_compensation, temp_compensation
-from heritageshm.viz import apply_theme
+from heritageshm.preprocessing import process_station
+from heritageshm.viz import apply_theme, plot_compensation_comparison
 
 apply_theme(context='notebook')
 
 # %% [markdown]
 # ## Step 1 · File Inspection
-# Before loading all files, inspect one representative raw file to identify the delimiter, 
-# column count, and date format.
+#
+# Inspect one representative raw file to confirm the delimiter, column count, and date format
+# before loading the entire directory.
 
 # %%
-# === USER INPUT ===
-# Replace with the path to any one raw file in your data folder
-sample_file = r"./data/raw/sensor/GUBBIO_20180726.adc"
-# ==================
+RAW_FOLDER   = 'data/raw/sensor'
+FILE_EXT     = '.adc'
 
-inspect_raw_file(sample_file)
+sample_files = glob.glob(os.path.join(RAW_FOLDER, f'*{FILE_EXT}'))
+if sample_files:
+    file_info = inspect_raw_file(sample_files[0])
+else:
+    print(f'No {FILE_EXT} files found in {RAW_FOLDER}. Check RAW_FOLDER and FILE_EXT.')
+    file_info = {}
 
 # %% [markdown]
-# ## Step 2 · Load and Merge Raw Sensor Files
-# Load all pieces of the sensor data.
+# ## Step 2 · Load Raw Sensor Files
+#
+# Read all files in the raw sensor directory and organise them into per-station DataFrames.
 
 # %%
-# === USER INPUT ===
-RAW_FOLDER    = 'data/raw/sensor'
-FILE_EXT      = '.adc'
-SEPARATOR     = '\t'
-HEADER        = None
+SEPARATOR = '\t'
+DECIMAL_COMMA = True
+HEADER = None
 
-# Map each station's sequential fields to the standard pipeline schema.
-# Use None if a sensor reading is missing in your raw data.
 STATIONS = {
     'st01': ['charge', 'temp', 'hum', 'absinc'],
     'st02': ['charge', 'temp', 'hum', 'absinc'],
-    'st03': ['charge', 'temp', 'hum', 'absinc']
+    'st03': ['charge', 'temp', 'hum', 'absinc'],
 }
-# ==================
+
+
 
 df_raw = load_sensor_directory(
     folder_path=RAW_FOLDER,
@@ -76,90 +82,78 @@ df_raw = load_sensor_directory(
     sep=SEPARATOR,
     header=HEADER,
     column_names=None,
-    date_col=0,  # Map 1st column to date
-    time_col=1,  # Map 2nd column to time
-    save_combined=False
+    date_col=0,
+    time_col=1,
+    save_combined=False,
 )
 
-print(f"\nLoaded dataset shape: {df_raw.shape}")
-print(f"Date range: {df_raw.index.min()} → {df_raw.index.max()}")
+print(f'\nLoaded dataset shape : {df_raw.shape}')
+print(f'Date range : {df_raw.index.min()} → {df_raw.index.max()}')
 
-# Organize data into independent station datasets using the dataloader module
 stations_dict = organize_sensor_data(df_raw, STATIONS)
-print(f"Organized {len(stations_dict)} independent stations from raw data.")
+print(f'Organised {len(stations_dict)} station(s): {list(stations_dict.keys())}')
 
 # %% [markdown]
-# ## Step 3 · Signal Cleaning and Saving
-# Clean the data and save to the interim format as a standardized CSV series.
+# ## Step 3 · Signal Cleaning and Temperature Compensation
+#
+# For each station, `process_station()` executes three operations in sequence:
+# 1. Removes rows where battery charge equals zero (power-loss events).
+# 2. Drops readings outside the physical validity range defined in `OUTLIER_THRESHOLDS`.
+# 3. Applies linear temperature compensation using `COMP_COEFF`.
+#    The raw signal is preserved as `{SIGNAL_COL}_raw` in the saved CSV to support
+#    later visualisation; only the compensated column is returned to the pipeline.
 
 # %%
-# Iterate through all the datasets created for the clean process
-from IPython.display import display
-import os
-import matplotlib.pyplot as plt
-import seaborn as sns
+SIGNAL_COL       = 'absinc'
+TEMP_COL         = 'temp'
+COMP_COEFF       = 0.005      # mdeg · °C⁻¹ · 10⁻³ — update from calibration sheet
+SPIKE_THRESHOLD  = 500.0       # mdeg — maximum allowed |Δ absinc| between samples
+OUTPUT_DIR       = 'data/interim/sensor'
 
-os.makedirs('data/interim/sensor', exist_ok=True)
+
+processed = {}
 
 for st, df_st in stations_dict.items():
-    print(f"--- Processing station {st} ---")
-    
-    # 1. Clean signal: power loss and outliers
-    outlier_thresholds = {'absinc': (-500, 500)}
-    df_clean = clean_signal(df_st, valid_charge_col='charge', outlier_thresholds=outlier_thresholds)
-    
-    # 2. Apply temperature calibration/compensation
-    if len(df_clean) > 0 and 'temp' in df_clean.columns and 'absinc' in df_clean.columns:
-        # Keep original normalized for visualization
-        orig_normalized = df_clean['absinc'] - df_clean['absinc'].dropna().iloc[0] if not df_clean['absinc'].dropna().empty else df_clean['absinc']
-        
-        df_clean = apply_compensation(
-            df=df_clean, 
-            target_col='absinc', 
-            new_col_name='absinc_clean', 
-            comp_func=temp_compensation, 
-            normalize=False, 
-            temp_col='temp', 
-            comp_coeff=0.005
-        )
-        
-        # Visualize for the first station
-        if st == list(stations_dict.keys())[0]:
-            fig, axes = plt.subplots(2, 1, figsize=(14, 8), sharex=True)
-            
-            # Before and After
-            axes[0].plot(df_clean.index, orig_normalized, label='Original (Normalized to 0)', color='steelblue', alpha=0.7)
-            axes[0].plot(df_clean.index, df_clean['absinc_clean'], label='Compensated', color='darkorange', alpha=0.9)
-            axes[0].set_title(f"Station {st}: Pre- vs Post-Compensation Signal")
-            axes[0].set_ylabel("Inclinometer (µrad)")
-            axes[0].legend()
-            axes[0].grid(True, alpha=0.3)
-            
-            # Difference
-            diff = df_clean['absinc_clean'] - orig_normalized
-            axes[1].plot(df_clean.index, diff, label='Difference (Compensated - Original)', color='crimson', alpha=0.8)
-            axes[1].set_title("Compensation Applied (Difference)")
-            axes[1].set_ylabel("Difference (µrad)")
-            axes[1].legend()
-            axes[1].grid(True, alpha=0.3)
-            
-            sns.despine()
-            plt.tight_layout()
-            plt.show()
+    df_clean, _ = process_station(
+        st=st,
+        df_st=df_st,
+        signal_col=SIGNAL_COL,
+        temp_col=TEMP_COL,
+        comp_coeff=COMP_COEFF,
+        spike_threshold=SPIKE_THRESHOLD,
+        output_dir=OUTPUT_DIR,
+    )
+    processed[st] = df_clean
 
-        # Keep only the compensated absinc (drop raw, rename compensated)
-        df_clean = df_clean.drop(columns=['absinc'])
-        df_clean = df_clean.rename(columns={'absinc_clean': 'absinc'})
-    
-    # 3. Save to a specific file
-    output_path = f"data/interim/sensor/{st}_preprocessed.csv"
-    df_clean.to_csv(output_path)
-    print(f"Preprocessed {st} data saved to: {output_path}")
-
-    # 4. Preview the cleaned dataset
-    print(f"Shape: {df_clean.shape} | Date range: {df_clean.index.min()} → {df_clean.index.max()}")
-    display(df_clean.head())
-    print()
-
+# %% [markdown]
+# ## Step 4 · Compensation Visualisation
+#
+# `plot_compensation_comparison()` reads directly from the saved interim CSV so it can be
+# called independently at any time — including outside this notebook — to inspect any station.
+# Modify `VIZ_STATION` (or `viz_file` and `viz_col` below) to inspect a different station or column.
 
 # %%
+VIZ_STATION = 'st02'
+viz_file    = os.path.join(OUTPUT_DIR, f'{VIZ_STATION}_preprocessed.csv')
+viz_col     = SIGNAL_COL   # column to plot; change here if a different signal is needed
+
+plot_compensation_comparison(
+    file_path=viz_file,
+    signal_col=viz_col,
+    save_plot=True,
+    save_path='outputs/figures',
+    filename='00_compensation_comparison',
+)
+
+# %% [markdown]
+# ## Step 5 · Dataset Preview
+#
+# Quick sanity check on the cleaned output for each station.
+
+# %%
+from IPython.display import display
+for st, df_clean in processed.items():
+    print(f'--- {st} ---  shape: {df_clean.shape}  |  '
+          f'{df_clean.index.min()} → {df_clean.index.max()}')
+    display(df_clean.head(3))
+    print()

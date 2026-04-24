@@ -8,42 +8,140 @@ import csv
 import pandas as pd
 from tqdm import tqdm
 
-def inspect_raw_file(file_path):
+def inspect_raw_file(file_path, n_preview=5):
     """
-    Inspects an unknown raw sensor file to help the user determine the 
-    correct delimiter, headers, and column count before loading.
+    Inspects a raw sensor file and robustly detects its delimiter,
+    decimal symbol, column count, and likely date/time format.
+
+    Handles European decimal commas correctly by excluding ',' from
+    delimiter candidates when it is detected as the decimal separator.
+
+    Parameters
+    ----------
+    file_path : str
+        Path to any one raw file in the sensor directory.
+    n_preview : int
+        Number of lines to print as a preview (default 5).
+
+    Returns
+    -------
+    dict with keys: 'delimiter', 'decimal', 'n_columns', 'header'
+        Ready to copy-paste into the Configuration block of Notebook 00.
     """
-    print(f"--- Inspecting File: {os.path.basename(file_path)} ---")
-    
+    import re
+
+    print(f"{'─'*60}")
+    print(f"  FILE INSPECTION: {os.path.basename(file_path)}")
+    print(f"{'─'*60}")
+
     try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            # Read the first few lines
-            head = [next(f) for _ in range(5)]
-    except StopIteration:
-        print("File is empty or has fewer than 5 lines.")
-        return
+        with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
+            lines = [line.rstrip('\n') for line in f if line.strip()]
+            lines = lines[:max(n_preview, 10)]  # read enough for robust detection
     except Exception as e:
-        print(f"Error reading file: {e}")
-        return
-        
-    # Attempt to sniff the dialect (delimiter, quote char)
-    try:
-        dialect = csv.Sniffer().sniff(head[0])
-        print(f"Detected Delimiter: '{dialect.delimiter}'")
-    except csv.Error:
-        print("Could not automatically detect delimiter. Please inspect the raw lines below.")
-        
-    # Count columns based on the first line
-    if 'dialect' in locals():
-        col_count = len(head[0].split(dialect.delimiter))
-        print(f"Detected Columns: {col_count}")
-        
-    print("\nFirst 5 lines of the file:")
-    print("-" * 40)
-    for line in head:
-        print(line.strip())
-    print("-" * 40)
-    print("Use this information to set 'sep' and 'column_names' in load_sensor_directory().\n")
+        print(f"  ERROR: Could not read file — {e}")
+        return {}
+
+    if not lines:
+        print("  WARNING: File appears empty.")
+        return {}
+
+    # ── 1. Decimal symbol detection ──────────────────────────────────────────
+    # Look for patterns like  "3,500"  (European) vs  "3.500"  (Anglo)
+    euro_pattern = re.compile(r'\b\d+,\d+\b')
+    anglo_pattern = re.compile(r'\b\d+\.\d+\b')
+    euro_hits  = sum(bool(euro_pattern.search(l))  for l in lines)
+    anglo_hits = sum(bool(anglo_pattern.search(l)) for l in lines)
+
+    if euro_hits > anglo_hits:
+        decimal_sym = ','
+        decimal_label = "comma  ','  (European format — decimal_comma=True)"
+    else:
+        decimal_sym = '.'
+        decimal_label = "period '.'  (Anglo format — decimal_comma=False)"
+
+    # ── 2. Delimiter detection ───────────────────────────────────────────────
+    # Candidates: tab, semicolon, pipe, space.
+    # Comma is added only when it is NOT the decimal separator.
+    candidates = [('\t', 'TAB'), (';', 'semicolon'), ('|', 'pipe')]
+    if decimal_sym != ',':
+        candidates.append((',', 'comma'))
+
+    best_delim = None
+    best_label = 'unknown'
+    best_score = -1
+
+    for delim, label in candidates:
+        counts = []
+        for line in lines[:10]:
+            # Temporarily neutralise decimal symbol to avoid false splits
+            test_line = line.replace(decimal_sym + '', '') if decimal_sym == delim else line
+            counts.append(test_line.count(delim))
+        # Score = minimum count (consistency) × mean count (density)
+        if min(counts) > 0:
+            score = min(counts) * (sum(counts) / len(counts))
+            if score > best_score:
+                best_score = score
+                best_delim = delim
+                best_label = label
+
+    if best_delim is None:
+        best_delim = '\t'
+        best_label = 'TAB (fallback — no clear delimiter detected)'
+
+    # ── 3. Column count ──────────────────────────────────────────────────────
+    col_counts = []
+    for line in lines[:10]:
+        parts = line.split(best_delim)
+        col_counts.append(len(parts))
+    n_cols = max(set(col_counts), key=col_counts.count)   # mode
+
+    # ── 4. Header detection ──────────────────────────────────────────────────
+    first_field = lines[0].split(best_delim)[0].strip()
+    has_header = not bool(re.match(r'^\d', first_field))
+    header_val = 0 if has_header else None
+
+    # ── 5. Date format hint ──────────────────────────────────────────────────
+    date_hint = 'unknown'
+    date_patterns = [
+        (r'^\d{2}/\d{2}/\d{2}',       'DD/MM/YY  (dayfirst=True)'),
+        (r'^\d{2}/\d{2}/\d{4}',       'DD/MM/YYYY (dayfirst=True)'),
+        (r'^\d{4}-\d{2}-\d{2}',       'YYYY-MM-DD (dayfirst=False)'),
+        (r'^\d{2}-\d{2}-\d{4}',       'DD-MM-YYYY (dayfirst=True)'),
+        (r'^\d{2}\.\d{2}\.\d{4}',     'DD.MM.YYYY (dayfirst=True)'),
+    ]
+    for pattern, label in date_patterns:
+        if re.match(pattern, lines[0].split(best_delim)[0].strip()):
+            date_hint = label
+            break
+
+    # ── 6. Report ─────────────────────────────────────────────────────────────
+    print(f"\n  DETECTED STRUCTURE")
+    print(f"  {'Delimiter':<22}: {best_label!r}")
+    print(f"  {'Decimal symbol':<22}: {decimal_label}")
+    print(f"  {'Column count':<22}: {n_cols}")
+    print(f"  {'Header row':<22}: {'Yes (row 0)' if has_header else 'None (header=None)'}")
+    print(f"  {'Date format hint':<22}: {date_hint}")
+
+    print(f"\n  SUGGESTED CONFIGURATION")
+    delim_repr = '\\t' if best_delim == '\t' else best_delim
+    print(f"  SEPARATOR           = '{delim_repr}'")
+    print(f"  DECIMAL_COMMA       = {decimal_sym == ','}")
+    print(f"  HEADER              = {header_val}")
+    print(f"  # Expected columns  : {n_cols}")
+
+    print(f"\n  FIRST {n_preview} LINES (raw)")
+    print(f"  {'─'*56}")
+    for line in lines[:n_preview]:
+        print(f"  {line}")
+    print(f"  {'─'*56}\n")
+
+    return {
+        'delimiter':  best_delim,
+        'decimal':    decimal_sym,
+        'n_columns':  n_cols,
+        'header':     header_val,
+    }
 
 def read_sensor_file(file_path, sep='\t', header=None, column_names=None, 
                      date_col='date', time_col='time', decimal_comma=True):

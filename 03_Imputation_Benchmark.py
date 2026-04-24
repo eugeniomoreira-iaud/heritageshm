@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.16.7
+#       jupytext_version: 1.18.1
 #   kernelspec:
 #     display_name: neuralprophet_env
 #     language: python
@@ -171,7 +171,7 @@ y_pred_val = impute_gap_iterative(
 y_true_val = df_full.loc[gap_idx_val, TARGET]
 valid_mask, y_true_sc, y_pred_sc, rmse, mae, r2, bias, maxe = evaluate_synthetic_gap(y_true_val, y_pred_val)
 
-metrics_df = pd.DataFrame([{"RMSE (µrad)": rmse, "MAE (µrad)": mae, "R²": r2, "Mean Bias (µrad)": bias, "Max Abs Error": maxe}])
+metrics_df = pd.DataFrame([{"RMSE (mdeg)": rmse, "MAE (mdeg)": mae, "R²": r2, "Mean Bias (mdeg)": bias, "Max Abs Error": maxe}])
 display(metrics_df.round(3))
 
 plot_synthetic_validation(df_full, TARGET, gap_idx_val, y_pred_sc, rmse, valid_mask, GAP_DURATION_H, save_plot=True, save_path=FIG_PATH, filename="03_03_synthetic_validation")

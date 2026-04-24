@@ -247,7 +247,7 @@ def plot_gap_overview(df_full, target, gap_blocks, save_plot=False, save_path='o
     ax.legend(handles=[obs_patch, gap_patch], loc="upper left")
     ax.set_title("Inclinometer Series — Observed Data and Gap Regions")
     ax.set_xlabel("Date")
-    ax.set_ylabel(f"{target} (µrad)")
+    ax.set_ylabel(f"{target} (mdeg)")
     ax.grid(True, alpha=0.3)
     plt.tight_layout()
     if save_plot: _save_figure(fig, save_path, filename)
@@ -285,7 +285,7 @@ def plot_synthetic_validation(df_full, target, gap_idx_val, y_pred_sc, rmse, val
             color="steelblue", linewidth=1.4, label="XGBoost imputed (iterative, Δy)")
     ax.set_title(f"Synthetic Gap Validation — Observed vs. Imputed ({gap_duration_h//24}-day gap)")
     ax.set_xlabel("Date")
-    ax.set_ylabel(f"{target} (µrad)")
+    ax.set_ylabel(f"{target} (mdeg)")
     ax.legend(loc="upper left")
     ax.grid(True, alpha=0.3)
     plt.tight_layout()
@@ -302,7 +302,7 @@ def plot_residual_distribution(residuals_val, bias, save_plot=False, save_path='
     ax.axvline(0,    color="black",   linestyle="--", linewidth=1.2, label="Zero bias")
     ax.axvline(bias, color="crimson", linestyle="--", linewidth=1.2, label=f"Mean bias = {bias:.3f}")
     ax.set_title("Residual Distribution — Synthetic Gap (imputed − observed)")
-    ax.set_xlabel("Residual (µrad)")
+    ax.set_xlabel("Residual (mdeg)")
     ax.set_ylabel("Density")
     ax.legend()
     ax.grid(True, alpha=0.3)
@@ -330,7 +330,7 @@ def plot_bootstrap_uncertainty(df_full, target, gap_idx_val, boot_mean, boot_std
             label="Bootstrap mean prediction")
     ax.set_title(f"Bootstrap Uncertainty Envelope — {n_bootstrap} resamples (conformal calibration)")
     ax.set_xlabel("Date")
-    ax.set_ylabel(f"{target} (µrad)")
+    ax.set_ylabel(f"{target} (mdeg)")
     ax.legend(loc="upper left", fontsize=8)
     ax.grid(True, alpha=0.3)
     plt.tight_layout()
@@ -353,7 +353,7 @@ def plot_full_reconstruction(df_full, target, working_full, imputed_flag, impute
                color="steelblue", s=1.2, zorder=2, label="XGBoost imputed")
     ax.set_title("Full Reconstructed Inclinometer Series — Observed + Imputed")
     ax.set_xlabel("Date")
-    ax.set_ylabel(f"{target} (µrad)")
+    ax.set_ylabel(f"{target} (mdeg)")
     ax.legend(loc="upper left", markerscale=4)
     ax.grid(True, alpha=0.3)
     plt.tight_layout()
@@ -367,8 +367,105 @@ def plot_uncertainty_profile(df_full, imputed_std, save_plot=False, save_path='o
                     color="steelblue", alpha=0.6)
     ax.set_title("Calibrated Uncertainty Profile — σ per Imputed Hour")
     ax.set_xlabel("Date")
-    ax.set_ylabel("σ (µrad)")
+    ax.set_ylabel("σ (mdeg)")
     ax.grid(True, alpha=0.3)
     plt.tight_layout()
     if save_plot: _save_figure(fig, save_path, filename)
+    plt.show()
+
+def plot_compensation_comparison(
+    file_path,
+    signal_col,
+    save_plot=False,
+    save_path='outputs/figures',
+    filename='00_compensation_comparison',
+    theme_kwargs=None,
+):
+    """
+    Loads a preprocessed station CSV and produces a two-panel figure:
+      - Top panel : raw signal vs. compensated signal (both normalized to 0 at t₀).
+      - Bottom panel: difference (compensated − raw).
+
+    Parameters
+    ----------
+    file_path : str
+        Path to the interim CSV file for one station (output of Notebook 00).
+        The file must contain a DatetimeIndex column named 'datetime' and at
+        least the columns '{signal_col}_raw' and '{signal_col}' (compensated).
+        If only '{signal_col}' is present the raw column is assumed to be the
+        same series (no compensation was recorded) and only one panel is shown.
+    signal_col : str
+        Base name of the structural signal to plot (e.g. 'absinc').
+    save_plot : bool
+        If True, saves the figure as PNG + SVG via _save_figure().
+    save_path : str
+        Directory for saved figures.
+    filename : str
+        Base filename (without extension).
+    theme_kwargs : dict or None
+        Optional keyword arguments forwarded to apply_theme().
+    """
+    if theme_kwargs is not None:
+        apply_theme(**theme_kwargs)
+
+    df = pd.read_csv(file_path, parse_dates=['datetime'], index_col='datetime')
+    df.sort_index(inplace=True)
+
+    raw_col  = f'{signal_col}_raw'
+    comp_col = signal_col
+
+    has_raw = raw_col in df.columns
+
+    if has_raw:
+        raw_norm  = df[raw_col]  - df[raw_col].dropna().iloc[0]
+        comp_norm = df[comp_col] - df[comp_col].dropna().iloc[0]
+        diff      = comp_norm - raw_norm
+
+        fig, axes = plt.subplots(2, 1, figsize=(14, 7), sharex=True)
+
+        # --- Panel 1: raw vs. compensated ---
+        ax = axes[0]
+        ax.plot(df.index, raw_norm,  color='steelblue',  linewidth=0.8, alpha=0.85,
+                label='Raw (normalized to 0)')
+        ax.plot(df.index, comp_norm, color='darkorange', linewidth=0.9, alpha=0.95,
+                label='Compensated')
+        ax.set_ylabel(f'{signal_col} (mdeg)')
+        ax.set_title(f'Signal Comparison — {os.path.basename(file_path)}')
+        ax.legend(loc='upper left')
+        ax.grid(True, alpha=0.3)
+        sns.despine(ax=ax)
+
+        # --- Panel 2: difference ---
+        ax = axes[1]
+        ax.fill_between(df.index, diff, 0, where=(diff >= 0),
+                        color='darkorange', alpha=0.55, linewidth=0,
+                        label='Positive correction')
+        ax.fill_between(df.index, diff, 0, where=(diff < 0),
+                        color='steelblue',  alpha=0.55, linewidth=0,
+                        label='Negative correction')
+        ax.axhline(0, color='black', linewidth=0.7, linestyle='--')
+        ax.set_ylabel('Difference (mdeg)')
+        ax.set_xlabel('Date')
+        ax.set_title('Compensation Applied (Compensated − Raw)')
+        ax.legend(loc='upper left')
+        ax.grid(True, alpha=0.3)
+        sns.despine(ax=ax)
+
+    else:
+        # Fallback: only the compensated series is available
+        comp_norm = df[comp_col] - df[comp_col].dropna().iloc[0]
+        fig, ax = plt.subplots(figsize=(14, 4))
+        ax.plot(df.index, comp_norm, color='darkorange', linewidth=0.9,
+                label='Compensated (normalized)')
+        ax.set_ylabel(f'{signal_col} (mdeg)')
+        ax.set_xlabel('Date')
+        ax.set_title(f'Compensated Signal — {os.path.basename(file_path)} '
+                     f'(no raw column "{raw_col}" found)')
+        ax.legend(loc='upper left')
+        ax.grid(True, alpha=0.3)
+        sns.despine(ax=ax)
+
+    plt.tight_layout()
+    if save_plot:
+        _save_figure(fig, save_path, filename)
     plt.show()

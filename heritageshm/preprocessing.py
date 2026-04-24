@@ -31,13 +31,21 @@ def clean_signal(df, valid_charge_col=None, outlier_thresholds=None):
         
     # 2. Filter out extreme physical outliers
     if outlier_thresholds:
-        for col, min_val in outlier_thresholds.items():
+        for col, threshold in outlier_thresholds.items():
             if col in df_clean.columns:
                 initial_len = len(df_clean)
-                df_clean = df_clean[df_clean[col] > min_val]
-                dropped = initial_len - len(df_clean)
-                if dropped > 0:
-                    print(f"Dropped {dropped} outliers below {min_val} in '{col}'.")
+                if isinstance(threshold, (list, tuple)) and len(threshold) == 2:
+                    min_val, max_val = threshold
+                    df_clean = df_clean[(df_clean[col] >= min_val) & (df_clean[col] <= max_val)]
+                    dropped = initial_len - len(df_clean)
+                    if dropped > 0:
+                        print(f"Dropped {dropped} outliers outside [{min_val}, {max_val}] in '{col}'.")
+                else:
+                    min_val = threshold
+                    df_clean = df_clean[df_clean[col] > min_val]
+                    dropped = initial_len - len(df_clean)
+                    if dropped > 0:
+                        print(f"Dropped {dropped} outliers below {min_val} in '{col}'.")
                 
     return df_clean
 

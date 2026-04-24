@@ -96,6 +96,8 @@ print(f"Organized {len(stations_dict)} independent stations from raw data.")
 # Iterate through all the datasets created for the clean process
 from IPython.display import display
 import os
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 os.makedirs('data/interim/sensor', exist_ok=True)
 
@@ -103,20 +105,48 @@ for st, df_st in stations_dict.items():
     print(f"--- Processing station {st} ---")
     
     # 1. Clean signal: power loss and outliers
-    outlier_thresholds = {'absinc': -500}
+    outlier_thresholds = {'absinc': (-500, 500)}
     df_clean = clean_signal(df_st, valid_charge_col='charge', outlier_thresholds=outlier_thresholds)
     
     # 2. Apply temperature calibration/compensation
     if len(df_clean) > 0 and 'temp' in df_clean.columns and 'absinc' in df_clean.columns:
+        # Keep original normalized for visualization
+        orig_normalized = df_clean['absinc'] - df_clean['absinc'].dropna().iloc[0] if not df_clean['absinc'].dropna().empty else df_clean['absinc']
+        
         df_clean = apply_compensation(
             df=df_clean, 
             target_col='absinc', 
             new_col_name='absinc_clean', 
             comp_func=temp_compensation, 
-            normalize=True, 
+            normalize=False, 
             temp_col='temp', 
             comp_coeff=0.005
         )
+        
+        # Visualize for the first station
+        if st == list(stations_dict.keys())[0]:
+            fig, axes = plt.subplots(2, 1, figsize=(14, 8), sharex=True)
+            
+            # Before and After
+            axes[0].plot(df_clean.index, orig_normalized, label='Original (Normalized to 0)', color='steelblue', alpha=0.7)
+            axes[0].plot(df_clean.index, df_clean['absinc_clean'], label='Compensated', color='darkorange', alpha=0.9)
+            axes[0].set_title(f"Station {st}: Pre- vs Post-Compensation Signal")
+            axes[0].set_ylabel("Inclinometer (µrad)")
+            axes[0].legend()
+            axes[0].grid(True, alpha=0.3)
+            
+            # Difference
+            diff = df_clean['absinc_clean'] - orig_normalized
+            axes[1].plot(df_clean.index, diff, label='Difference (Compensated - Original)', color='crimson', alpha=0.8)
+            axes[1].set_title("Compensation Applied (Difference)")
+            axes[1].set_ylabel("Difference (µrad)")
+            axes[1].legend()
+            axes[1].grid(True, alpha=0.3)
+            
+            sns.despine()
+            plt.tight_layout()
+            plt.show()
+
         # Keep only the compensated absinc (drop raw, rename compensated)
         df_clean = df_clean.drop(columns=['absinc'])
         df_clean = df_clean.rename(columns={'absinc_clean': 'absinc'})
@@ -131,3 +161,5 @@ for st, df_st in stations_dict.items():
     display(df_clean.head())
     print()
 
+
+# %%

@@ -11,66 +11,126 @@ def clean_signal(df, signal_col, spike_threshold, valid_charge_col=None):
     """
     Cleans a raw sensor signal in two sequential steps:
 
-    1. **Spike removal (first-order difference filter):**
-       Computes |Δy_t| = |y_t − y_{t−1}| for the signal column.
-       Any row where this absolute difference exceeds `spike_threshold`
-       is dropped. Applied *before* charge filtering so the difference
-       is computed on the uninterrupted raw sequence.
+    1. Spike removal (first-order difference filter):
+       Computes |Delta y_t| = |y_t - y_{t-1}| for the signal column.
+       Any row where this absolute difference exceeds spike_threshold is dropped.
 
-    2. **Power-loss removal:**
-       Drops rows where the charge column equals zero (sensor off or
-       battery depleted). Applied after spike removal.
-
-    Parameters
-    ----------
-    df : pd.DataFrame
-        Raw station DataFrame with a DatetimeIndex.
-    signal_col : str
-        Name of the structural signal column (e.g. 'absinc').
-    spike_threshold : float
-        Maximum allowed absolute first-order difference (in signal units,
-        e.g. mdeg). Rows exceeding this are treated as glitches and removed.
-        A value of ~5–20 mdeg is typical for inclinometers; set based on
-        the expected maximum physical rate of change between samples.
-    valid_charge_col : str or None
-        Column name for battery charge. Rows where this equals zero are
-        dropped. Set to None to skip this filter.
+    2. Power-loss removal:
+       Drops rows where the charge column equals zero.
 
     Returns
     -------
-    pd.DataFrame
-        Cleaned DataFrame with the same columns as the input.
+    df_clean : pd.DataFrame
+        Retained rows only.
+    df_dropped : pd.DataFrame
+        All dropped rows with an extra column 'drop_reason'
+        ('spike' or 'power_loss') for downstream visualisation.
     """
     df_clean = df.copy()
     n0 = len(df_clean)
+    dropped_frames = []
 
-    # ── Step 1: spike filter on first-order difference ───────────────────────
+    # ── Step 1: spike filter ─────────────────────────────────────────────────
     if signal_col in df_clean.columns:
         numeric_signal = pd.to_numeric(df_clean[signal_col], errors='coerce')
         abs_diff = numeric_signal.diff().abs()
         spike_mask = abs_diff > spike_threshold
         n_spikes = spike_mask.sum()
-        df_clean = df_clean[~spike_mask]
         if n_spikes > 0:
+            df_spikes = df_clean[spike_mask].copy()
+            df_spikes['drop_reason'] = 'spike'
+            dropped_frames.append(df_spikes)
+            df_clean = df_clean[~spike_mask]
             print(f"  Dropped {n_spikes:>7} spike rows  "
-                  f"(|Δ{signal_col}| > {spike_threshold})")
+                  f"(|Delta {signal_col}| > {spike_threshold})")
     else:
         print(f"  WARNING: signal column '{signal_col}' not found — "
               f"spike filter skipped.")
 
-    # ── Step 2: power-loss filter ─────────────────────────────────────────────
+    # ── Step 2: power-loss filter ────────────────────────────────────────────
     if valid_charge_col and valid_charge_col in df_clean.columns:
         n_before = len(df_clean)
-        df_clean = df_clean[df_clean[valid_charge_col] != 0]
-        n_dropped = n_before - len(df_clean)
-        if n_dropped > 0:
+        power_mask = df_clean[valid_charge_col] == 0
+        if power_mask.sum() > 0:
+            df_power = df_clean[power_mask].copy()
+            df_power['drop_reason'] = 'power_loss'
+            dropped_frames.append(df_power)
+            df_clean = df_clean[~power_mask]
+            n_dropped = n_before - len(df_clean)
             print(f"  Dropped {n_dropped:>7} power-loss rows "
                   f"(zero charge in '{valid_charge_col}')")
 
     print(f"  Retained {len(df_clean):>7} / {n0} rows "
           f"({100 * len(df_clean) / n0:.1f} %)")
 
-    return df_clean
+    df_dropped = pd.concat(dropped_frames) if dropped_frames else pd.DataFrame(columns=df.columns.tolist() + ['drop_reason'])
+    return df_clean, df_dropped
+
+
+def process_station(st, df_st, signal_col, temp_col, comp_coeff,
+                    spike_threshold, output_dir):
+    """
+    Full preprocessing pipeline for a single station.
+
+    1. Spike removal via first-order difference filter.
+    2. Power-loss removal (zero charge rows).
+    3. Temperature compensation + normalization (series starts at 0).
+    4. Saves interim CSV with compensated column and raw column preserved.
+    5. Saves a companion '_dropped.csv' with all removed rows and their reason.
+
+    Returns
+    -------
+    df_clean : pd.DataFrame
+        Cleaned and compensated DataFrame (raw column removed).
+    output_path : str
+        Full path of the saved CSV.
+    """
+    import os
+    os.makedirs(output_dir, exist_ok=True)
+
+    print(f"\n{'─'*50}")
+    print(f"  Station: {st}  |  raw rows: {len(df_st)}")
+    print(f"{'─'*50}")
+
+    # Steps 1 & 2: spike filter then power-loss filter
+    df_clean, df_dropped = clean_signal(
+        df_st,
+        signal_col=signal_col,
+        spike_threshold=spike_threshold,
+        valid_charge_col='charge',
+    )
+
+    # Step 3: temperature compensation + normalization
+    if df_clean.empty:
+        print(f"  WARNING: no rows remain after cleaning — "
+              f"compensation skipped. Review spike_threshold.")
+    elif signal_col in df_clean.columns and temp_col in df_clean.columns:
+        df_clean[f'{signal_col}_raw'] = df_clean[signal_col].copy()
+        df_clean = apply_compensation(
+            df=df_clean,
+            target_col=signal_col,
+            new_col_name=f'{signal_col}_comp',
+            comp_func=temp_compensation,
+            normalize=True,
+            temp_col=temp_col,
+            comp_coeff=comp_coeff,
+        )
+        df_clean = df_clean.drop(columns=[signal_col])
+        df_clean = df_clean.rename(columns={f'{signal_col}_comp': signal_col})
+
+    # Step 4: save main CSV (raw preserved for visualisation)
+    output_path = os.path.join(output_dir, f'{st}_preprocessed.csv')
+    df_clean.to_csv(output_path)
+    print(f"  Saved → {output_path}")
+    print(f"  Shape  : {df_clean.shape}  |  "
+          f"{df_clean.index.min()} → {df_clean.index.max()}")
+
+    # Step 5: save dropped rows companion CSV
+    dropped_path = os.path.join(output_dir, f'{st}_dropped.csv')
+    df_dropped.to_csv(dropped_path)
+    print(f"  Dropped → {dropped_path}  ({len(df_dropped)} rows)")
+
+    return df_clean.drop(columns=[f'{signal_col}_raw'], errors='ignore'), output_path
 
 def apply_compensation(df, target_col, new_col_name, comp_func, normalize=True, **kwargs):
     """
@@ -279,7 +339,7 @@ def process_station(st, df_st, signal_col, temp_col, comp_coeff,
     print(f"{'─'*50}")
 
     # Step 1 & 2: spike filter then power-loss filter
-    df_clean = clean_signal(
+    df_clean, df_dropped = clean_signal(
         df_st,
         signal_col=signal_col,
         spike_threshold=spike_threshold,
@@ -297,7 +357,7 @@ def process_station(st, df_st, signal_col, temp_col, comp_coeff,
             target_col=signal_col,
             new_col_name=f'{signal_col}_comp',
             comp_func=temp_compensation,
-            normalize=False,
+            normalize=True,
             temp_col=temp_col,
             comp_coeff=comp_coeff,
         )

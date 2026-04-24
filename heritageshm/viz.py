@@ -376,6 +376,10 @@ def plot_uncertainty_profile(df_full, imputed_std, save_plot=False, save_path='o
 def plot_compensation_comparison(
     file_path,
     signal_col,
+    date_start=None,
+    date_end=None,
+    dropped_path=None,
+    dot_size=2,
     save_plot=False,
     save_path='outputs/figures',
     filename='00_compensation_comparison',
@@ -383,21 +387,31 @@ def plot_compensation_comparison(
 ):
     """
     Loads a preprocessed station CSV and produces a two-panel figure:
-      - Top panel : raw signal vs. compensated signal (both normalized to 0 at t₀).
-      - Bottom panel: difference (compensated − raw).
+      - Top panel : scatter of raw signal and compensated+normalized signal.
+                    Dropped rows (spikes and power-loss) overlaid as red dots
+                    if a companion '_dropped.csv' path is supplied.
+      - Bottom panel: compensation difference (compensated - raw) as filled area.
+
+    The CSV is the single source of truth for normalization. This function
+    never re-normalizes. date_start / date_end are zoom filters only.
 
     Parameters
     ----------
     file_path : str
-        Path to the interim CSV file for one station (output of Notebook 00).
-        The file must contain a DatetimeIndex column named 'datetime' and at
-        least the columns '{signal_col}_raw' and '{signal_col}' (compensated).
-        If only '{signal_col}' is present the raw column is assumed to be the
-        same series (no compensation was recorded) and only one panel is shown.
+        Path to the interim CSV for one station (output of Notebook 00).
     signal_col : str
-        Base name of the structural signal to plot (e.g. 'absinc').
+        Base name of the structural signal (e.g. 'absinc').
+    date_start : str or None
+        ISO date 'YYYY-MM-DD' for zoom start. None = full series.
+    date_end : str or None
+        ISO date 'YYYY-MM-DD' for zoom end. None = full series.
+    dropped_path : str or None
+        Path to the companion '_dropped.csv'. If supplied, dropped rows are
+        overlaid as red scatter dots on the top panel.
+    dot_size : float
+        Marker size for the scatter plots (default 2).
     save_plot : bool
-        If True, saves the figure as PNG + SVG via _save_figure().
+        If True, saves PNG + SVG via _save_figure().
     save_path : str
         Directory for saved figures.
     filename : str
@@ -408,61 +422,99 @@ def plot_compensation_comparison(
     if theme_kwargs is not None:
         apply_theme(**theme_kwargs)
 
+    # ── 1. Load full series ───────────────────────────────────────────────────
     df = pd.read_csv(file_path, parse_dates=['datetime'], index_col='datetime')
     df.sort_index(inplace=True)
 
     raw_col  = f'{signal_col}_raw'
     comp_col = signal_col
+    has_raw  = raw_col in df.columns
 
-    has_raw = raw_col in df.columns
+    # ── 2. Load dropped rows if available ────────────────────────────────────
+    df_dropped = None
+    if dropped_path and os.path.exists(dropped_path):
+        df_dropped = pd.read_csv(dropped_path, parse_dates=['datetime'], index_col='datetime')
+        df_dropped.sort_index(inplace=True)
+        # Normalize dropped raw values using the same reference as the full series
+        if has_raw:
+            raw_ref = df[raw_col].dropna().iloc[0]
+            df_dropped[f'{signal_col}_raw_norm'] = df_dropped[signal_col] - raw_ref
+
+    # ── 3. Compute difference on FULL series before any zoom ─────────────────
+    if has_raw:
+        raw_ref   = df[raw_col].dropna().iloc[0]
+        raw_full  = df[raw_col] - raw_ref      # normalize raw for visual only
+        comp_full = df[comp_col]               # already normalized — never touch
+        diff_full = comp_full - raw_full
+
+    # ── 4. Apply date filter = zoom only ─────────────────────────────────────
+    def _slice(s, s0, s1):
+        if s0: s = s.loc[s0:]
+        if s1: s = s.loc[:s1]
+        return s
 
     if has_raw:
-        raw_norm  = df[raw_col]  - df[raw_col].dropna().iloc[0]
-        comp_norm = df[comp_col] - df[comp_col].dropna().iloc[0]
-        diff      = comp_norm - raw_norm
+        raw_plot  = _slice(raw_full,  date_start, date_end)
+        comp_plot = _slice(comp_full, date_start, date_end)
+        diff_plot = _slice(diff_full, date_start, date_end)
+    else:
+        df = _slice(df, date_start, date_end)
 
+    if df_dropped is not None:
+        df_dropped = _slice(df_dropped, date_start, date_end)
+
+    # ── 5. Plot ───────────────────────────────────────────────────────────────
+    if has_raw:
         fig, axes = plt.subplots(2, 1, figsize=(14, 7), sharex=True)
 
-        # --- Panel 1: raw vs. compensated ---
+        # Panel 1: scatter raw vs compensated + dropped overlay
         ax = axes[0]
-        ax.plot(df.index, raw_norm,  color='steelblue',  linewidth=0.8, alpha=0.85,
-                label='Raw (normalized to 0)')
-        ax.plot(df.index, comp_norm, color='darkorange', linewidth=0.9, alpha=0.95,
-                label='Compensated')
+        ax.scatter(raw_plot.index,  raw_plot,  s=dot_size, color='steelblue',
+                   alpha=0.7, linewidths=0, label='Raw')
+        ax.scatter(comp_plot.index, comp_plot, s=dot_size, color='darkorange',
+                   alpha=0.7, linewidths=0, label='Compensated')
+        if df_dropped is not None and not df_dropped.empty and signal_col in df_dropped.columns:
+            raw_ref = df[raw_col].dropna().iloc[0] if not raw_plot.empty else 0
+            dropped_vals = df_dropped[signal_col] - raw_ref
+            ax.scatter(dropped_vals.index, dropped_vals, s=dot_size * 2,
+                       color='crimson', alpha=0.8, linewidths=0,
+                       zorder=5, label='Dropped')
+
         ax.set_ylabel(f'{signal_col} (mdeg)')
         ax.set_title(f'Signal Comparison — {os.path.basename(file_path)}')
-        ax.legend(loc='upper left')
         ax.grid(True, alpha=0.3)
+        ax.legend(loc='upper left', bbox_to_anchor=(1.01, 1),
+                  borderaxespad=0, frameon=True, markerscale=4)
         sns.despine(ax=ax)
 
-        # --- Panel 2: difference ---
+        # Panel 2: compensation difference
         ax = axes[1]
-        ax.fill_between(df.index, diff, 0, where=(diff >= 0),
+        ax.fill_between(diff_plot.index, diff_plot, 0, where=(diff_plot >= 0),
                         color='darkorange', alpha=0.55, linewidth=0,
                         label='Positive correction')
-        ax.fill_between(df.index, diff, 0, where=(diff < 0),
+        ax.fill_between(diff_plot.index, diff_plot, 0, where=(diff_plot < 0),
                         color='steelblue',  alpha=0.55, linewidth=0,
                         label='Negative correction')
         ax.axhline(0, color='black', linewidth=0.7, linestyle='--')
         ax.set_ylabel('Difference (mdeg)')
         ax.set_xlabel('Date')
-        ax.set_title('Compensation Applied (Compensated − Raw)')
-        ax.legend(loc='upper left')
+        ax.set_title('Compensation Applied (Compensated - Raw)')
         ax.grid(True, alpha=0.3)
+        ax.legend(loc='upper left', bbox_to_anchor=(1.01, 1),
+                  borderaxespad=0, frameon=True)
         sns.despine(ax=ax)
 
     else:
-        # Fallback: only the compensated series is available
-        comp_norm = df[comp_col] - df[comp_col].dropna().iloc[0]
         fig, ax = plt.subplots(figsize=(14, 4))
-        ax.plot(df.index, comp_norm, color='darkorange', linewidth=0.9,
-                label='Compensated (normalized)')
+        ax.scatter(df.index, df[comp_col], s=dot_size, color='darkorange',
+                   alpha=0.7, linewidths=0, label='Compensated')
         ax.set_ylabel(f'{signal_col} (mdeg)')
         ax.set_xlabel('Date')
         ax.set_title(f'Compensated Signal — {os.path.basename(file_path)} '
                      f'(no raw column "{raw_col}" found)')
-        ax.legend(loc='upper left')
         ax.grid(True, alpha=0.3)
+        ax.legend(loc='upper left', bbox_to_anchor=(1.01, 1),
+                  borderaxespad=0, frameon=True, markerscale=4)
         sns.despine(ax=ax)
 
     plt.tight_layout()

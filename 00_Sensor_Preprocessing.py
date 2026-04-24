@@ -33,6 +33,7 @@
 import sys
 import os
 import glob
+from IPython.display import display
 sys.path.insert(0, os.path.abspath('..'))
 
 from heritageshm.dataloader import inspect_raw_file, load_sensor_directory, organize_sensor_data
@@ -114,7 +115,7 @@ OUTPUT_DIR       = 'data/interim/sensor'
 processed = {}
 
 for st, df_st in stations_dict.items():
-    df_clean, _ = process_station(
+    df_clean, df_dropped = process_station(
         st=st,
         df_st=df_st,
         signal_col=SIGNAL_COL,
@@ -128,18 +129,30 @@ for st, df_st in stations_dict.items():
 # %% [markdown]
 # ## Step 4 · Compensation Visualisation
 #
-# `plot_compensation_comparison()` reads directly from the saved interim CSV so it can be
-# called independently at any time — including outside this notebook — to inspect any station.
-# Modify `VIZ_STATION` (or `viz_file` and `viz_col` below) to inspect a different station or column.
+# `plot_compensation_comparison()` reads directly from the saved interim CSV so it can be called independently at any time — including outside this notebook — to inspect any station.
+#
+# **Parameters:**
+#  - `VIZ_STATION`: station ID to inspect.
+#  - `VIZ_COL`: column to plot (defaults to `SIGNAL_COL`).
+#  - `VIZ_START` / `VIZ_END`: optional date strings (`'YYYY-MM-DD'`) to restrict
+#    the displayed window. Set to `None` to show the full series.
 
 # %%
 VIZ_STATION = 'st02'
-viz_file    = os.path.join(OUTPUT_DIR, f'{VIZ_STATION}_preprocessed.csv')
-viz_col     = SIGNAL_COL   # column to plot; change here if a different signal is needed
+VIZ_COL     = SIGNAL_COL        # change if a different column is needed
+VIZ_START   = '2021-01-01'               # e.g. '2020-06-01' — or None for no lower bound
+VIZ_END     = '2021-02-01'               # e.g. '2021-03-31' — or None for no upper bound
+
+viz_file     = os.path.join(OUTPUT_DIR, f'{VIZ_STATION}_preprocessed.csv')
+dropped_file = os.path.join(OUTPUT_DIR, f'{VIZ_STATION}_dropped.csv')
 
 plot_compensation_comparison(
     file_path=viz_file,
-    signal_col=viz_col,
+    signal_col=SIGNAL_COL,
+    dropped_path=dropped_file,
+    date_start=VIZ_START,     # set 'YYYY-MM-DD' for zoom
+    date_end=VIZ_END,
+    dot_size=2,
     save_plot=True,
     save_path='outputs/figures',
     filename='00_compensation_comparison',
@@ -151,7 +164,6 @@ plot_compensation_comparison(
 # Quick sanity check on the cleaned output for each station.
 
 # %%
-from IPython.display import display
 for st, df_clean in processed.items():
     print(f'--- {st} ---  shape: {df_clean.shape}  |  '
           f'{df_clean.index.min()} → {df_clean.index.max()}')

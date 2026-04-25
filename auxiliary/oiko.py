@@ -30,25 +30,25 @@
 # | **Read by NB01** | `pd.read_csv(..., index_col=0, parse_dates=True)` |
 # | **Metadata dropped** | `coordinates (lat,lon)`, `model (name)`, `model elevation (surface)`, `utc_offset (hrs)` |
 # | **Data columns** | All ERA5 variables returned by the API, unchanged |
-# | **Timezone** | UTC — align to local time in Notebook 01 if the sensor uses local time |
+# | **Timezone** | UTC - align to local time in Notebook 01 if the sensor uses local time |
 #
 # ---
 #
 # ## Steps
-# 1. **Parameters** — Location, date range, API key, output path.
-# 2. **Download** — Call the Oikolab API with the full parameter list.
-# 3. **Parse & clean** — Promote datetime to index, drop metadata columns.
-# 4. **Save** — Write CSV with `index=True`.
+# 1. **Parameters** - Location, date range, API key, output path.
+# 2. **Download** - Call the Oikolab API with the full parameter list.
+# 3. **Parse & clean** - Promote datetime to index, drop metadata columns.
+# 4. **Save** - Write CSV with `index=True`.
 
 # %% [markdown]
-# ## Step 1 · Parameters
+# ## Step 1 - Parameters
 #
 # | Parameter | Description |
 # |---|---|
 # | `LAT`, `LON` | Decimal coordinates of the monitoring site |
 # | `START`, `END` | Inclusive date range (`YYYY-MM-DD`). Should fully bracket the sensor window |
 # | `API_KEY` | Oikolab API key |
-# | `OUTPUT_PATH` | Destination CSV — must match `PROXY_FILE` in Notebook 01 |
+# | `OUTPUT_PATH` | Destination CSV - must match `PROXY_FILE` in Notebook 01 |
 
 # %%
 import requests
@@ -65,7 +65,7 @@ API_KEY     = '8426a7e187b9481ab575814f707c8f8d'
 OUTPUT_PATH = '../data/raw/proxies/oikolab_weather.csv'
 # ==================
 
-# Oikolab response metadata — always present, never needed downstream
+# Oikolab response metadata - always present, never needed downstream
 META_COLS = [
     'coordinates (lat,lon)',
     'model (name)',
@@ -74,10 +74,10 @@ META_COLS = [
 ]
 
 # %% [markdown]
-# ## Step 2 · Download
+# ## Step 2 - Download
 #
 # Full ERA5 parameter list as provided by the Oikolab platform.
-# Column selection for analysis is done in Notebook 01 — keep everything here.
+# Column selection for analysis is done in Notebook 01 - keep everything here.
 
 # %%
 PARAMS = [
@@ -130,7 +130,7 @@ r.raise_for_status()
 print(f'Download complete. Status: {r.status_code} | Response size: {len(r.content)/1024:.1f} KB')
 
 # %% [markdown]
-# ## Step 3 · Parse and Clean
+# ## Step 3 - Parse and Clean
 #
 # - `datetime (UTC)` is promoted to the index and renamed `datetime`.
 # - Metadata columns are dropped.
@@ -146,21 +146,21 @@ df.index.name = 'datetime'
 df = df.drop(columns=[c for c in META_COLS if c in df.columns])
 
 print('Shape      :', df.shape)
-print('Date range :', df.index.min(), '\u2192', df.index.max())
+print('Date range :', df.index.min(), '->', df.index.max())
 print('Columns    :', list(df.columns))
 print()
 
 missing = df.isnull().sum()
 if missing.any():
-    print('\u26a0 Missing values:')
+    print('WARNING - Missing values:')
     print(missing[missing > 0])
 else:
-    print('\u2713 No missing values.')
+    print('OK - No missing values.')
 
 display(df.head())
 
 # %% [markdown]
-# ## Step 4 · Save
+# ## Step 4 - Save
 #
 # Written with `index=True` so the datetime index is the first CSV column.
 # Notebook 01 reads it with `pd.read_csv(..., index_col=0, parse_dates=True)`.
@@ -168,4 +168,4 @@ display(df.head())
 # %%
 os.makedirs(os.path.dirname(OUTPUT_PATH), exist_ok=True)
 df.to_csv(OUTPUT_PATH, index=True)
-print(f'Saved {df.shape[0]} rows \u00d7 {df.shape[1]} cols \u2192 {OUTPUT_PATH}')
+print(f'Saved {df.shape[0]} rows x {df.shape[1]} cols -> {OUTPUT_PATH}')

@@ -19,6 +19,10 @@
 # Downloads hourly weather data from the Oikolab ERA5 API for a given location and date range,
 # cleans the response, and saves the result in the format expected by **Notebook 01**.
 #
+# The Oikolab API enforces a 500-unit limit per request (1 unit = 1 parameter x 1 year).
+# With 63 parameters the safe window is 7 days per request, so this notebook
+# splits the full date range into annual chunks and concatenates the results.
+#
 # ---
 #
 # ## Output Format Contract
@@ -36,8 +40,8 @@
 #
 # ## Steps
 # 1. **Parameters** - Location, date range, API key, output path.
-# 2. **Download** - Call the Oikolab API with the full parameter list.
-# 3. **Parse & clean** - Promote datetime to index, drop metadata columns.
+# 2. **Download** - Fetch one year at a time, with progress reporting.
+# 3. **Concatenate & clean** - Merge chunks, promote datetime index, drop metadata columns.
 # 4. **Save** - Write CSV with `index=True`.
 
 # %% [markdown]
@@ -55,6 +59,9 @@ import requests
 import pandas as pd
 import io
 import os
+import time
+from datetime import date, timedelta
+from dateutil.relativedelta import relativedelta
 
 # === USER INPUT ===
 LAT         = 43.35343
@@ -76,8 +83,9 @@ META_COLS = [
 # %% [markdown]
 # ## Step 2 - Download
 #
-# Full ERA5 parameter list as provided by the Oikolab platform.
-# Column selection for analysis is done in Notebook 01 - keep everything here.
+# The API limit is 500 units per request (1 unit ~ 1 parameter x 1 year).
+# With 63 parameters, each annual chunk uses ~63 units, well within the limit.
+# Chunks are fetched year by year; a short sleep avoids rate-limiting.
 
 # %%
 PARAMS = [
@@ -108,39 +116,62 @@ PARAMS = [
     'surface_net_thermal_radiation', 'forecast_albedo',
 ]
 
-r = requests.get(
-    'https://api.oikolab.com/weather',
-    params={
-        'param': PARAMS,
-        'lat': LAT,
-        'lon': LON,
-        'start': START,
-        'end': END,
-        'freq': 'H',
-        'resample_method': 'mean',
-        'format': 'csv',
-    },
-    headers={'api-key': API_KEY},
-)
+def build_annual_windows(start_str, end_str):
+    """Yield (chunk_start, chunk_end) pairs, one per calendar year."""
+    start = date.fromisoformat(start_str)
+    end   = date.fromisoformat(end_str)
+    cursor = start
+    while cursor <= end:
+        chunk_end = min(date(cursor.year, 12, 31), end)
+        yield cursor.isoformat(), chunk_end.isoformat()
+        cursor = date(cursor.year + 1, 1, 1)
 
-if not r.ok:
-    print('API error response body:')
-    print(r.text)
-r.raise_for_status()
-print(f'Download complete. Status: {r.status_code} | Response size: {len(r.content)/1024:.1f} KB')
+chunks = []
+windows = list(build_annual_windows(START, END))
+print(f'Fetching {len(windows)} annual chunks ...')
+
+for i, (chunk_start, chunk_end) in enumerate(windows):
+    print(f'  [{i+1}/{len(windows)}] {chunk_start} -> {chunk_end} ...', end=' ')
+    r = requests.get(
+        'https://api.oikolab.com/weather',
+        params={
+            'param': PARAMS,
+            'lat': LAT,
+            'lon': LON,
+            'start': chunk_start,
+            'end': chunk_end,
+            'freq': 'H',
+            'resample_method': 'mean',
+            'format': 'csv',
+        },
+        headers={'api-key': API_KEY},
+    )
+    if not r.ok:
+        print(f'FAILED ({r.status_code})')
+        print(r.text)
+        r.raise_for_status()
+    chunk_df = pd.read_csv(io.StringIO(r.text))
+    chunks.append(chunk_df)
+    print(f'OK ({len(chunk_df)} rows)')
+    time.sleep(1)  # polite pause between requests
+
+print('All chunks downloaded.')
 
 # %% [markdown]
-# ## Step 3 - Parse and Clean
+# ## Step 3 - Concatenate and Clean
 #
+# - Chunks are concatenated and deduplicated on the datetime column.
 # - `datetime (UTC)` is promoted to the index and renamed `datetime`.
 # - Metadata columns are dropped.
-# - Shape, date range, column list, and a missingness check are printed.
 
 # %%
-df = pd.read_csv(io.StringIO(r.text))
+df = pd.concat(chunks, ignore_index=True)
+
+# Deduplicate boundary rows that may appear in two adjacent chunks
+df = df.drop_duplicates(subset='datetime (UTC)')
 
 df['datetime (UTC)'] = pd.to_datetime(df['datetime (UTC)'])
-df = df.set_index('datetime (UTC)')
+df = df.set_index('datetime (UTC)').sort_index()
 df.index.name = 'datetime'
 
 df = df.drop(columns=[c for c in META_COLS if c in df.columns])

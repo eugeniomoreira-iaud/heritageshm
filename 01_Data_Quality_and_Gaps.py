@@ -16,21 +16,27 @@
 # %% [markdown]
 # # Notebook 01 · Data Quality, Proxies, and Gap Characterization
 #
-# This notebook executes **Phase A, Step 1** of the `heritageshm` pipeline:
+# **Pipeline position**: Phase A, Step 1 — runs after Notebook 00.
 #
+# ## Steps
 # 1. **Sensor Loading** — Load the preprocessed sensor CSV from Notebook 00.
-# 2. **Proxy Loading** — Explicitly load specific environmental proxies (e.g. Skin Temperature, Air Temp).
-# 3. **Alignment** — Resample and synchronize multiple proxies onto the sensor index.
-# 4. **Gap Characterization** — Classify missing data and diagnose gap taxonomy.
-# 5. **Save** — Export the aligned, cleaned dataset to `/data/interim/aligned/`.
+# 2. **Proxy Loading** — Load environmental proxies (e.g. temperature, radiation, humidity).
+# 3. **Alignment** — Resample and synchronise multiple proxies onto the sensor index.
+# 4. **Gap Characterization** — Classify missing data, diagnose missingness mechanism
+#    (MCAR / MAR / MNAR-power) using covariate correlation tests.
+# 5. **Save** — Export the aligned dataset to `data/interim/aligned/`.
+#
+# ## Outputs
+# | Artifact | Path | Description |
+# |---|---|---|
+# | Aligned dataset | `data/interim/aligned/{station}_aligned_dataset.csv` | Sensor + proxy, resampled |
+# | Gap histogram   | `outputs/figures/01_01_{station}_gap_histogram.png`  | Gap-length distribution |
+# | Gap stats table | `outputs/tables/01_01_{station}_gap_stats.csv`       | Descriptive statistics |
 
 # %%
-import sys
 import os
 import pandas as pd
 from IPython.display import display
-
-sys.path.insert(0, os.path.abspath('..'))
 
 from heritageshm.dataloader import load_preprocessed_sensor, load_proxy_data, save_interim_data
 from heritageshm.preprocessing import align_multiple_proxies
@@ -41,64 +47,61 @@ apply_theme(context='notebook')
 
 # %% [markdown]
 # ## Step 1 · Load Preprocessed Sensor Data
-
-# %% [markdown]
+#
 # ### Parameter Tuning Guidance
 #
-# **TARGET_STATION**: Change this to match your sensor station identifier. The file naming convention expects
-# `{station}_preprocessed.csv` in the `/data/interim/sensor/` directory.
+# | Parameter | Type | Description |
+# |---|---|---|
+# | `TARGET_STATION` | `str` | Station identifier matching the filename `{station}_preprocessed.csv` |
 #
-# **Tips**:
-# - Ensure you've run Notebook 00 first to generate the preprocessed sensor file.
-# - Common station IDs: 'st01', 'st02', 'st03', etc.
-# - If loading fails, verify the file exists at the expected path.
+# **Prerequisite**: Notebook 00 must have been run to generate the preprocessed sensor CSV.
 
 # %%
 TARGET_STATION = 'st02'
 
-SENSOR_FILE = f'data/interim/sensor/{TARGET_STATION}_preprocessed.csv'
-df_sensor = load_preprocessed_sensor(SENSOR_FILE)
+SENSOR_FILE = 'data/interim/sensor/%s_preprocessed.csv' % TARGET_STATION
+df_sensor   = load_preprocessed_sensor(SENSOR_FILE)
 
-print(f"Loaded {TARGET_STATION} sensor dataset: {df_sensor.shape}")
-print(f"Sensor date range: {df_sensor.index.min()} → {df_sensor.index.max()}")
+print("Loaded %s sensor dataset: %s" % (TARGET_STATION, str(df_sensor.shape)))
+print("Sensor date range: %s \u2192 %s" % (df_sensor.index.min(), df_sensor.index.max()))
 df_sensor.head(3)
 
 # %% [markdown]
-# ## Step 2 · Load Proxies Individually
-# Fetch any environmental proxy data you want to associate with the sensor.
-
-# %%
-PROXY_FILE = 'data/raw/proxies/oikolab_weather.csv'
-
-# Peek at the columns without loading the entire file into memory
-sample_df = pd.read_csv(PROXY_FILE, nrows=0)
-print("Available columns in the proxy file:")
-for col in sample_df.columns:
-    print(f"  - {col}")
-
-# %% [markdown]
+# ## Step 2 · Load Proxies
+#
 # ### Parameter Tuning Guidance
 #
-# **PROXY_FILE**: Update this path to point to your environmental proxy data file. Supported formats include CSV files from:
-# - ERA5 reanalysis data
-# - Local weather station data
-# - Satellite-derived climate proxies
+# | Parameter | Type | Description |
+# |---|---|---|
+# | `PROXY_FILE` | `str` | Path to the environmental proxy CSV. Supported sources: ERA5, Oikolab, local station |
+# | `PROXY_COLS` | `list` | Columns to retain. Remove unused variables to reduce alignment overhead |
+# | `MAX_PROXY_MISSING_FRAC` | `float` | Post-alignment warning threshold. Any proxy column with a missing fraction above this triggers a warning (default `0.10` = 10 %) |
 #
-# **Tips**:
-# - Proxy files should have a 'datetime (UTC)' column for automatic parsing.
-# - Place proxy files in `/data/raw/proxies/`.
-# - Multiple proxy sources can be loaded by duplicating this cell with different file paths.
+# **Proxy selection for masonry / historic stone structures**:
+# - **Temperature** (`temperature`, `skin_temperature`, `urban_temperature`) — primary driver of thermal expansion.
+# - **Relative humidity** (`relative_humidity`, `dewpoint_temperature`, `wetbulb_temperature`) — co-primary for
+#   hygrothermal coupling in porous stone and historic masonry; do not omit.
+# - **Radiation** (`surface_solar_radiation`, `surface_thermal_radiation`) — critical for structures with
+#   significant thermal mass or direct solar exposure.
+# - **Wind** (`wind_speed`, `wind_direction`) — relevant for tall / slender elements.
+#
+# Use cointegration tests in Notebook 02 to validate proxy selection quantitatively.
+
+# %%
+PROXY_FILE  = 'data/raw/proxies/oikolab_weather.csv'
+
+# Peek at available columns without loading the full file
+_sample = pd.read_csv(PROXY_FILE, nrows=0)
+print("Available columns in proxy file:")
+for c in _sample.columns:
+    print("  -", c)
 
 # %%
 # === USER INPUT ===
-PROXY_FILE = 'data/raw/proxies/oikolab_weather.csv'
-
-# Select only the proxy columns you want to use downstream.
-# Remove or comment out any you don't need.
 PROXY_COLS = [
     'temperature (degC)',
     'dewpoint_temperature (degC)',
-    'relative_humidity (0-1)',
+    'relative_humidity (0-1)',          # hygrothermal — keep for masonry
     'wetbulb_temperature (degC)',
     'skin_temperature (degC)',
     'urban_temperature (degC)',
@@ -109,52 +112,40 @@ PROXY_COLS = [
     'surface_solar_radiation (W/m^2)',
     'surface_thermal_radiation (W/m^2)',
 ]
+
+# Maximum allowed missing fraction in any proxy column after alignment.
+# Columns exceeding this trigger a warning (pipeline continues).
+# Raise to 1.0 to suppress warnings; lower to 0.05 for stricter checking.
+MAX_PROXY_MISSING_FRAC = 0.10
 # ==================
 
-# Metadata columns to always drop
-META_COLS = ['coordinates (lat,lon)', 'model (name)',
-             'model elevation (surface)', 'utc_offset (hrs)']
+META_COLS = [
+    'coordinates (lat,lon)', 'model (name)',
+    'model elevation (surface)', 'utc_offset (hrs)',
+]
 
-# Load
-df_proxy = pd.read_csv(PROXY_FILE,
-                       parse_dates=['datetime (UTC)'],
-                       index_col='datetime (UTC)')
+df_proxy = pd.read_csv(
+    PROXY_FILE,
+    parse_dates=['datetime (UTC)'],
+    index_col='datetime (UTC)',
+)
 df_proxy.index.name = 'datetime'
-
-# Drop metadata, keep only selected signals
 df_proxy = df_proxy.drop(columns=[c for c in META_COLS if c in df_proxy.columns])
 df_proxy = df_proxy[[c for c in PROXY_COLS if c in df_proxy.columns]]
 
-print(f"Loaded proxy dataset: {df_proxy.shape}")
-print(f"Proxy date range: {df_proxy.index.min()} → {df_proxy.index.max()}")
+print("Loaded proxy dataset: %s" % str(df_proxy.shape))
+print("Proxy date range: %s \u2192 %s" % (df_proxy.index.min(), df_proxy.index.max()))
 display(df_proxy.head(3))
 
-# Build the proxies_dict expected by align_multiple_proxies()
 proxies_dict = {'oikolab': df_proxy}
-print(f"\nLoaded {len(proxies_dict)} proxy dataset(s).")
-
-# %% [markdown]
-# ### Parameter Tuning Guidance
-#
-# **PROXY_COLS**: Select environmental variables that have physical relevance to your structural response.
-# The grey-box model in Notebook 04 will use these as exogenous regressors.
-#
-# **Selection Guidelines**:
-# - **Temperature proxies** (`temperature`, `skin_temperature`, `urban_temperature`): Critical for thermal expansion/contraction effects.
-# - **Radiation proxies** (`surface_solar_radiation`, `surface_thermal_radiation`): Important for structures with significant thermal mass.
-# - **Humidity proxies** (`relative_humidity`, `dewpoint_temperature`): Relevant for moisture-sensitive materials.
-# - **Wind proxies** (`wind_speed`, `wind_direction`): Useful for tall/slender structures.
-#
-# **Tips**:
-# - Start with temperature and radiation variables for masonry/stone structures.
-# - Use cointegration tests in Notebook 02 to validate proxy selection.
-# - Fewer, well-chosen proxies improve model interpretability.
-# - Uncomment additional columns based on your structure type.
+print("\nLoaded %d proxy dataset(s)." % len(proxies_dict))
 
 # %% [markdown]
 # ## Step 2b · Proxy Temporal Coverage Check
-# Verify that the proxy data fully covers the sensor monitoring period before alignment.
-# A silent temporal mismatch would produce NaN-filled proxy columns with no downstream warning.
+#
+# Verifies that the proxy data fully brackets the sensor monitoring period.
+# A silent temporal mismatch would silently produce NaN-filled proxy columns
+# in all downstream notebooks.
 
 # %%
 sensor_start, sensor_end = df_sensor.index.min(), df_sensor.index.max()
@@ -162,109 +153,128 @@ proxy_start,  proxy_end  = df_proxy.index.min(),  df_proxy.index.max()
 
 coverage_ok = (proxy_start <= sensor_start) and (proxy_end >= sensor_end)
 
-print(f"Sensor window : {sensor_start} → {sensor_end}")
-print(f"Proxy window  : {proxy_start} → {proxy_end}")
+print("Sensor window : %s \u2192 %s" % (sensor_start, sensor_end))
+print("Proxy window  : %s \u2192 %s" % (proxy_start,  proxy_end))
 
 if coverage_ok:
-    print("✓ Proxy data fully covers the sensor monitoring period.")
+    print("\u2713 Proxy data fully covers the sensor monitoring period.")
 else:
     if proxy_start > sensor_start:
-        print(f"⚠ WARNING: Proxy starts {proxy_start - sensor_start} after sensor start. "
-              f"Sensor data before {proxy_start} will have NaN proxies.")
+        print("\u26a0 WARNING: Proxy starts %s after sensor start. "
+              "Sensor data before %s will have NaN proxies."
+              % (proxy_start - sensor_start, proxy_start))
     if proxy_end < sensor_end:
-        print(f"⚠ WARNING: Proxy ends {sensor_end - proxy_end} before sensor end. "
-              f"Sensor data after {proxy_end} will have NaN proxies.")
+        print("\u26a0 WARNING: Proxy ends %s before sensor end. "
+              "Sensor data after %s will have NaN proxies."
+              % (sensor_end - proxy_end, proxy_end))
 
 assert coverage_ok, (
-    "Proxy temporal coverage is insufficient. Extend the proxy extraction period "
-    "to fully bracket the sensor monitoring window before proceeding."
+    "Proxy temporal coverage is insufficient. "
+    "Extend the proxy extraction period to fully bracket the sensor "
+    "monitoring window before proceeding."
 )
 
 # %% [markdown]
 # ## Step 3 · Resampling and Alignment
-# Using `align_multiple_proxies`, we resample all defined proxies to match the desired monitoring frequency.
-
-# %% [markdown]
+#
 # ### Parameter Tuning Guidance
 #
-# **TARGET_FREQ**: Sets the resampling frequency for aligning sensor and proxy data. Common options:
-# - `'h'` (hourly): Recommended for most SHM applications; balances detail with computational efficiency.
-# - `'30min'` or `'15min'`: Higher resolution for fast dynamic responses.
-# - `'2h'` or `'3h'`: Lower resolution for slow thermal responses or long-term monitoring.
+# | Parameter | Type | Default | Description |
+# |---|---|---|---|
+# | `TARGET_FREQ` | `str` | `'h'` | Resampling frequency. `'h'` (hourly) suits most SHM applications. Use `'30min'`/`'15min'` for fast dynamics; `'2h'`/`'3h'` for slow thermal responses |
 #
-# **Tips**:
-# - Hourly (`'h'`) is the default and works well for masonry/stone structures.
-# - Use finer resolution only if your analysis requires capturing rapid environmental changes.
-# - Ensure proxy data has sufficient resolution for your chosen frequency.
+# **Note**: `add_prefix=True` prepends the proxy source name to each column
+# (e.g. `oikolab_temperature (degC)`).  This prevents silent name collisions
+# if a second proxy source is added later.
 
 # %%
-TARGET_FREQ = 'h'  # Hourly
+TARGET_FREQ = 'h'  # Hourly — recommended default for masonry SHM
 
 if proxies_dict:
-    df_aligned = align_multiple_proxies(df_sensor, proxies_dict, resample_freq=TARGET_FREQ, add_prefix=False)
+    df_aligned = align_multiple_proxies(
+        df_sensor,
+        proxies_dict,
+        resample_freq=TARGET_FREQ,
+        add_prefix=True,   # prevents name collisions with multiple proxy sources
+    )
 else:
     print("No proxies loaded. Proceeding with sensor data only.")
     df_aligned = df_sensor.resample(TARGET_FREQ).mean()
 
-print(f"Aligned dataset shape: {df_aligned.shape}")
+print("Aligned dataset shape: %s" % str(df_aligned.shape))
 df_aligned.head(3)
 
 # %% [markdown]
-# ### Step 3b · Post-Alignment Validation
-# Inspect the missing-data fraction per column immediately after alignment.
-# This catches silent alignment failures (e.g., index mismatches, unit mismatches, or insufficient proxy coverage)
+# ### Step 3b · Post-Alignment Missingness Audit
+#
+# Inspects the missing-data fraction per column immediately after alignment.
+# Catches silent alignment failures (index mismatches, insufficient proxy coverage)
 # before they propagate to downstream notebooks.
+#
+# Columns exceeding `MAX_PROXY_MISSING_FRAC` generate a warning.
+# Columns that are **entirely** NaN raise an error and stop the pipeline.
 
 # %%
-missing_frac = df_aligned.isnull().mean().rename('missing_frac').to_frame()
-missing_frac['missing_pct'] = (missing_frac['missing_frac'] * 100).round(2)
-missing_frac['n_missing'] = df_aligned.isnull().sum()
+missing_frac           = df_aligned.isnull().mean().rename('missing_frac').to_frame()
+missing_frac['pct']    = (missing_frac['missing_frac'] * 100).round(2)
+missing_frac['n_miss'] = df_aligned.isnull().sum()
 
-print("--- Post-Alignment Missingness Summary ---")
+print("--- Post-Alignment Missingness Audit ---")
 display(missing_frac.sort_values('missing_frac', ascending=False))
 
-# Warn if any proxy column is entirely NaN (total coverage failure)
+# Error: entirely-NaN columns indicate a total coverage failure
 fully_missing = missing_frac[missing_frac['missing_frac'] == 1.0].index.tolist()
 if fully_missing:
     raise ValueError(
-        f"The following columns are entirely NaN after alignment — "
-        f"check index compatibility and proxy coverage: {fully_missing}"
+        "The following columns are entirely NaN after alignment — "
+        "check index compatibility and proxy coverage: %s" % fully_missing
     )
 
-# %% [markdown]
-# ## Step 4 · Gap Characterization and Final Save
-# Diagnose the gaps in the primary structural signal, export the figure and statistics table,
-# then save the unified dataset for downstream analysis.
+# Warning: partially-missing columns above the user-set threshold
+high_missing = missing_frac[
+    (missing_frac['missing_frac'] > MAX_PROXY_MISSING_FRAC) &
+    (missing_frac['missing_frac'] < 1.0)
+].index.tolist()
+if high_missing:
+    print("\n\u26a0 WARNING: The following columns exceed the %.0f%% missing threshold:"
+          % (MAX_PROXY_MISSING_FRAC * 100))
+    for col in high_missing:
+        print("  %s — %.1f%% missing" % (col, missing_frac.loc[col, 'pct']))
+    print("  Consider extending the proxy extraction period or removing these columns.")
+else:
+    print("\n\u2713 All columns are within the %.0f%% missing threshold."
+          % (MAX_PROXY_MISSING_FRAC * 100))
 
 # %% [markdown]
+# ## Step 4 · Gap Characterization
+#
+# Diagnoses gaps in the primary structural signal.  `characterize_gaps` now
+# performs a **missingness-covariate correlation test** to classify the
+# missingness mechanism:
+#
+# | Mechanism | Meaning | Implication |
+# |---|---|---|
+# | **MCAR** | Gaps are random, independent of any variable | Standard interpolation adequate |
+# | **MAR** | Gaps correlated with an *observed* covariate | Regression-based imputation preferred |
+# | **MNAR-power** | Gaps correlated with `charge` == 0 | Power-outage events; proxy-based NeuralProphet imputation |
+#
 # ### Parameter Tuning Guidance
 #
-# **TARGET_COL**: The structural response variable to analyze for data gaps.
-#
-# **Selection Guidelines**:
-# - Choose the main structural response variable (e.g., inclination, strain, displacement).
-# - This variable will be the target for imputation in Notebook 03.
-# - Common choices: `absinc` (absolute inclination), `strain`, `displacement`.
-#
-# **max_impute_gap** (in `characterize_gaps`): Threshold for classifying gap severity.
-# - `0` (default): Classifies all gaps regardless of length; no interpolation is applied.
-# - Set to a positive integer to linearly interpolate gaps shorter than this threshold.
-#
-# **HISTOGRAM_BINS**: Controls the number of bins in the gap length distribution histogram.
-# - Default: 50 bins. Adjust between 20 (coarser) and 100 (finer) depending on gap diversity.
-#
-# **Interpreting Gap Taxonomy**:
-# - **MCAR**: Gaps occur randomly; simpler imputation methods work well.
-# - **MAR**: Gaps related to observed variables; use regression-based methods.
-# - **MNAR**: Gaps related to unobserved factors; requires advanced methods (XGBoost, BiLSTM).
+# | Parameter | Type | Default | Description |
+# |---|---|---|---|
+# | `TARGET_COL` | `str` | `'absinc'` | Structural response column to analyse |
+# | `HISTOGRAM_BINS` | `int` | `50` | Number of bins in the gap-length histogram (20–100 typical) |
+# | `HISTOGRAM_COLOR` | `str` | `'black'` | Matplotlib colour for the histogram bars. Accepts named colours (`'black'`, `'steelblue'`) or hex codes (`'#2c3e50'`) |
+# | `max_impute_gap` | `int` | `0` | Max consecutive NaNs to fill by linear interpolation before classification. Keep at `0` unless you want a pre-scan with partial filling |
 
 # %%
-TARGET_COL     = 'absinc'  # The main signal to check for gaps
-HISTOGRAM_BINS = 50        # Number of bins for gap length distribution
+TARGET_COL       = 'absinc'   # Main structural response
+HISTOGRAM_BINS   = 50         # Number of histogram bins
+HISTOGRAM_COLOR  = 'black'    # Bar fill colour — change to e.g. '#2c7bb6' for blue
 
-GAP_FIG_PATH = f'outputs/figures/01_01_{TARGET_STATION}_gap_histogram.png'
-GAP_TAB_PATH = f'outputs/tables/01_01_{TARGET_STATION}_gap_stats.csv'
-ALIGNED_PATH  = f'data/interim/aligned/{TARGET_STATION}_aligned_dataset.csv'
+GAP_FIG_PATH  = 'outputs/figures/01_01_%s_gap_histogram.png'  % TARGET_STATION
+GAP_TAB_PATH  = 'outputs/tables/01_01_%s_gap_stats.csv'       % TARGET_STATION
+ALIGNED_PATH  = 'data/interim/aligned/%s_aligned_dataset.csv' % TARGET_STATION
 
 os.makedirs('outputs/figures', exist_ok=True)
 os.makedirs('outputs/tables',  exist_ok=True)
@@ -279,43 +289,43 @@ try:
         target_col=TARGET_COL,
         max_impute_gap=0,
         histogram_bins=HISTOGRAM_BINS,
+        bar_color=HISTOGRAM_COLOR,
         save_plot_path=GAP_FIG_PATH,
     )
     gap_characterization_ok = True
 
 except Exception as e:
-    print(f"⚠ Gap characterization failed: {e}")
+    print("\u26a0 Gap characterization failed: %s" % e)
     print("The aligned dataset will NOT be saved. Resolve the error before proceeding.")
 
 # %% [markdown]
 # ### Gap Statistics Summary
-# Display and export the full gap statistics table for reference in the paper.
 
 # %%
 if gap_characterization_ok:
-    total_obs    = len(df_aligned)
+    total_obs     = len(df_aligned)
     total_missing = df_aligned[TARGET_COL].isnull().sum()
-    missing_pct  = total_missing / total_obs * 100
+    missing_pct   = total_missing / total_obs * 100
 
-    print(f"\n--- Gap Statistics Summary for '{TARGET_COL}' ---")
-    print(f"Total observations : {total_obs}")
-    print(f"Total missing      : {total_missing} ({missing_pct:.2f}%)")
+    print("\n--- Gap Statistics for '%s' ---" % TARGET_COL)
+    print("Total observations : %d"      % total_obs)
+    print("Total missing      : %d (%.2f%%)" % (total_missing, missing_pct))
     display(gap_stats.rename('value').to_frame())
 
-    # Export gap stats as a paper-ready CSV table
     gap_stats_export = gap_stats.rename('value').to_frame()
     gap_stats_export.loc['total_missing_pct'] = missing_pct
     gap_stats_export.to_csv(GAP_TAB_PATH)
-    print(f"\nGap statistics saved to: {GAP_TAB_PATH}")
-    print(f"Gap histogram saved to : {GAP_FIG_PATH}")
+    print("\nGap statistics saved to : " + GAP_TAB_PATH)
+    print("Gap histogram saved to  : " + GAP_FIG_PATH)
 
 # %% [markdown]
 # ## Step 5 · Save Aligned Dataset
-# Only saves if gap characterization completed successfully.
+#
+# Saves only if gap characterization completed without errors.
 
 # %%
 if gap_characterization_ok:
     save_interim_data(df_aligned, ALIGNED_PATH)
-    print(f"Aligned dataset saved to: {ALIGNED_PATH}")
+    print("Aligned dataset saved to: " + ALIGNED_PATH)
 else:
-    print("Save skipped — gap characterization did not complete successfully.")
+    print("Save skipped \u2014 gap characterization did not complete successfully.")

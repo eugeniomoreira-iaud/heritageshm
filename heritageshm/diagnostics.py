@@ -10,159 +10,222 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from statsmodels.tsa.stattools import coint, adfuller, kpss
 from statsmodels.stats.diagnostic import acorr_ljungbox
-from scipy.stats import pearsonr
+from scipy.stats import pearsonr, chi2_contingency
 
 
 def shift_and_correlate(df, target, proxy, max_lag, step=1):
     """
-    Screens cross-correlation across varying lags to find the optimal thermal inertia.
+    Screens cross-correlation across varying lags to find the optimal thermal
+    inertia between a structural signal and an environmental proxy.
 
-    Parameters:
-    - df: DataFrame containing target and proxy.
-    - target: Name of the target column.
-    - proxy: Name of the proxy column.
-    - max_lag: Maximum lag to test (e.g., 72 hours).
-    - step: Step size for lags.
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame containing both ``target`` and ``proxy`` columns.
+    target : str
+        Name of the structural response column.
+    proxy : str
+        Name of the environmental proxy column.
+    max_lag : int
+        Maximum lag to test (number of time steps, e.g. 72 for 72 hours).
+    step : int, optional
+        Step size between tested lags.  Default ``1``.
 
-    Returns:
-    - lags: Array of tested lag values.
-    - corrs: Pearson correlation at each lag.
+    Returns
+    -------
+    lags : np.ndarray
+        Array of tested lag values.
+    corrs : list of float
+        Pearson correlation coefficient at each lag.
     """
     lags = np.arange(0, max_lag + 1, step)
     corrs = []
 
-    # Drop NaNs just for the correlation window
     df_clean = df[[target, proxy]].dropna()
 
     for lag in lags:
-        if lag == 0:
-            shifted = df_clean[proxy]
-        else:
-            shifted = df_clean[proxy].shift(lag)
-
-        # Re-drop NaNs after shift
+        shifted = df_clean[proxy] if lag == 0 else df_clean[proxy].shift(lag)
         valid = pd.concat([df_clean[target], shifted], axis=1).dropna()
         if len(valid) > 100:
             r, _ = pearsonr(valid.iloc[:, 0], valid.iloc[:, 1])
         else:
             r = 0
-
         corrs.append(r)
 
     return lags, corrs
 
 
 def characterize_gaps(
-    df, target_col, max_impute_gap=0, save_plot_path=None, histogram_bins=50
+    df,
+    target_col,
+    max_impute_gap=0,
+    save_plot_path=None,
+    histogram_bins=50,
+    bar_color='black',
 ):
     """
-    Characterizes missing data: gap duration, continuity, and recurrence.
-    Optionally applies linear interpolation for small gaps.
-    Generates a histogram plot of the gap lengths and returns the updated dataframe,
-    statistical summary, and a series of exact gap lengths.
+    Characterizes missing data: gap duration, continuity, recurrence, and
+    association with observed covariates (missingness-correlation test).
 
-    Parameters:
-    - df: DataFrame with a DatetimeIndex.
-    - target_col: The column to analyze for missing data.
-    - max_impute_gap: Maximum number of consecutive missing values to interpolate linearly. Default 0 (no imputation).
-    - save_plot_path: Path to save the generated histogram figure. Optional.
-    - histogram_bins: Number of bins for the gap length histogram. Default 50.
+    Optionally applies linear interpolation for small gaps, then generates a
+    clean histogram of gap lengths.
 
-    Returns:
-    - df_imputed: DataFrame with simple imputation applied (if max_impute_gap > 0).
-    - gap_stats: A pandas Series containing descriptive statistics of the gaps.
-    - gap_lengths: A Series listing the exact length of every continuous gap sequence.
+    Histogram style
+    ---------------
+    Bars are filled solid with ``bar_color`` (default black), zero gap between
+    bars (``rwidth=1``), and no edge lines (``edgecolor='none'``).  The number
+    of bins is controlled by ``histogram_bins``.
+
+    Missingness-correlation test
+    ----------------------------
+    For every *other* numeric column in ``df`` a Pearson correlation is computed
+    between a binary missingness indicator of ``target_col`` and the covariate
+    values (NaN rows in either series are dropped pairwise).  Columns with
+    |r| >= 0.10 and p < 0.05 are flagged as MAR candidates; if the strongest
+    predictor is ``charge`` (the power-loss sentinel) the diagnosis is refined
+    to MNAR-power.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame with a DatetimeIndex.
+    target_col : str
+        Column to analyse for missing data.
+    max_impute_gap : int, optional
+        Maximum number of consecutive NaNs to fill by linear interpolation.
+        Default ``0`` (classify only, no imputation).
+    save_plot_path : str or None, optional
+        File path to save the histogram figure.  ``None`` to skip.  Default ``None``.
+    histogram_bins : int, optional
+        Number of bins for the gap-length histogram.  Default ``50``.
+    bar_color : str, optional
+        Matplotlib colour for the histogram bars.  Default ``'black'``.
+
+    Returns
+    -------
+    df_imputed : pd.DataFrame
+        DataFrame with imputation applied (if ``max_impute_gap > 0``).
+    gap_stats : pd.Series
+        Descriptive statistics of all detected gap lengths.
+    gap_lengths : pd.Series
+        Exact length (in time steps) of every contiguous missing block.
     """
     if target_col not in df.columns:
-        raise KeyError(f"Column '{target_col}' not found in DataFrame.")
+        raise KeyError("Column '%s' not found in DataFrame." % target_col)
 
     df_imputed = df.copy()
 
+    # ── Optional linear interpolation for short gaps ──────────────────────────
     if max_impute_gap > 0:
-        print(
-            f"Applying linear interpolation strictly for complete gaps <= {max_impute_gap} consecutive values..."
-        )
+        print("Applying linear interpolation for gaps <= %d consecutive values..."
+              % max_impute_gap)
         mask = df_imputed[target_col].isnull()
         if mask.any():
-            # Calculate length of each gap block
-            blocks = mask.astype(int).groupby(mask.astype(int).diff().ne(0).cumsum())
-            gap_sizes = blocks.transform("sum")
-
-            # Interpolate everything linearly
-            interp = df_imputed[target_col].interpolate(method="linear")
-
-            # Restore NaNs for blocks that were strictly larger than max_impute_gap
-            too_large_mask = mask & (gap_sizes > max_impute_gap)
-            interp[too_large_mask] = np.nan
-
+            blocks    = mask.astype(int).groupby(mask.astype(int).diff().ne(0).cumsum())
+            gap_sizes = blocks.transform('sum')
+            interp    = df_imputed[target_col].interpolate(method='linear')
+            interp[mask & (gap_sizes > max_impute_gap)] = np.nan
             df_imputed[target_col] = interp
 
-    # Create a boolean mask where True = missing data
+    # ── Gap detection ─────────────────────────────────────────────────────────
     missing_mask = df_imputed[target_col].isnull()
 
-    # If there is no missing data at all
     if not missing_mask.any():
-        print(f"No missing data found in '{target_col}'.")
+        print("No missing data found in '%s'." % target_col)
         return df_imputed, pd.Series(dtype=float), pd.Series(dtype=int)
 
-    # Group contiguous True values
-    # diff().ne(0).cumsum() creates unique IDs for contiguous blocks
-    gap_blocks = missing_mask.astype(int).groupby(
+    gap_blocks  = missing_mask.astype(int).groupby(
         missing_mask.astype(int).diff().ne(0).cumsum()
     )
+    block_sums  = gap_blocks.sum()
+    gap_lengths = block_sums[block_sums > 0]
+    gap_stats   = gap_lengths.describe()
 
-    # Sum the block lengths, but only keep the blocks that are actually missing (value > 0)
-    gap_lengths = gap_blocks.sum()[gap_blocks.sum() > 0]
+    print("\n--- Gap Taxonomy for '%s' ---" % target_col)
+    print("Total Gaps Detected : %d"   % int(gap_stats['count']))
+    print("Average Gap Length  : %.2f time steps" % gap_stats['mean'])
+    print("Maximum Gap Length  : %d time steps"   % int(gap_stats['max']))
+    print("Minimum Gap Length  : %d time steps"   % int(gap_stats['min']))
+    print("Gap Length Std Dev  : %.2f time steps" % gap_stats['std'])
 
-    gap_stats = gap_lengths.describe()
+    # ── Missingness-correlation test ──────────────────────────────────────────
+    # Build a binary indicator: 1 = missing in target_col, 0 = present
+    miss_indicator = missing_mask.astype(int)
+    numeric_cols   = [
+        c for c in df_imputed.select_dtypes(include=[np.number]).columns
+        if c != target_col
+    ]
 
-    print(f"\n--- Gap Taxonomy for '{target_col}' ---")
-    print(f"Total Gaps Detected: {int(gap_stats['count'])}")
-    print(f"Average Gap Length:  {gap_stats['mean']:.2f} time steps")
-    print(f"Maximum Gap Length:  {int(gap_stats['max'])} time steps")
-    print(f"Minimum Gap Length:  {int(gap_stats['min'])} time steps")
-    print(f"Gap Length Std Dev:  {gap_stats['std']:.2f} time steps")
+    mar_candidates = []
+    mnar_power     = False
 
-    # Bin interval information
-    gap_min = int(gap_stats["min"])
-    gap_max = int(gap_stats["max"])
-    bin_edges = np.linspace(gap_min, gap_max, histogram_bins + 1)
-    print(f"\nHistogram Bin Intervals ({histogram_bins} bins):")
-    print(f"Bin width: {bin_edges[1] - bin_edges[0]:.1f} time steps")
-    for i in range(len(bin_edges) - 1):
-        print(
-            f"  Bin {i + 1:2d}: [{bin_edges[i]:6.1f}, {bin_edges[i + 1]:6.1f}) time steps"
-        )
+    if numeric_cols:
+        print("\n--- Missingness-Covariate Correlation Test ---")
+        print("%-45s  %8s  %10s  %s" % ('Covariate', '|r|', 'p-value', 'Flag'))
+        print("-" * 75)
+        for col in numeric_cols:
+            pair = pd.concat([miss_indicator, df_imputed[col]], axis=1).dropna()
+            if len(pair) < 30:
+                continue
+            r, p = pearsonr(pair.iloc[:, 0], pair.iloc[:, 1])
+            flagged = abs(r) >= 0.10 and p < 0.05
+            flag_str = 'MAR candidate' if flagged else ''
+            print("%-45s  %8.4f  %10.4e  %s" % (col, abs(r), p, flag_str))
+            if flagged:
+                mar_candidates.append((col, abs(r), p))
+                if col == 'charge':
+                    mnar_power = True
 
-    # Simple heuristic to flag gap type based on SHM missing-data literature
-    # Short scattered gaps = MCAR, Long contiguous outages = MNAR/MAR
-    if gap_stats["mean"] > 10 and gap_stats["max"] > 100:
-        print(
-            "\nDiagnosis: High likelihood of structured, contiguous outages (MNAR/MAR)."
-        )
-        print("Recommendation: Advanced imputation (e.g., BiLSTM or XGBoost) required.")
+    # ── Diagnostic verdict ────────────────────────────────────────────────────
+    print("\n--- Missingness Mechanism Diagnosis ---")
+    if mnar_power:
+        print("Diagnosis : MNAR-power  (missingness strongly correlated with 'charge').")
+        print("            Power-outage gaps are structurally caused, not random.")
+        print("Imputation: Proxy-based regression is preferred (NeuralProphet with")
+        print("            environmental regressors).  Sequence models (BiLSTM) are")
+        print("            secondary.  Simple interpolation is inappropriate for")
+        print("            long outage blocks.")
+    elif mar_candidates:
+        best = max(mar_candidates, key=lambda x: x[1])
+        print("Diagnosis : MAR  (missingness correlated with observed covariate '%s', |r|=%.3f)."
+              % (best[0], best[1]))
+        print("Imputation: Regression-based methods using correlated covariates are appropriate.")
+    elif gap_stats['mean'] > 10 and gap_stats['max'] > 100:
+        print("Diagnosis : Likely MNAR/MAR (long structured outages; no observed correlate found).")
+        print("            Consider checking for unlogged operational events.")
+        print("Imputation: Advanced methods (proxy-based regression, XGBoost) recommended.")
     else:
-        print("\nDiagnosis: Gaps appear scattered and random (MCAR).")
-        print("Recommendation: Standard interpolation or basic models may suffice.")
+        print("Diagnosis : Likely MCAR  (short, scattered gaps; no covariate correlation).")
+        print("Imputation: Standard interpolation or basic models may suffice.")
 
-    # Plotting the histogram
-    plt.figure(figsize=(10, 5))
-    plt.hist(
-        gap_lengths, bins=histogram_bins, color="tab:red", alpha=0.7, edgecolor="black"
+    # ── Histogram ─────────────────────────────────────────────────────────────
+    fig, ax = plt.subplots(figsize=(10, 5))
+
+    ax.hist(
+        gap_lengths,
+        bins=histogram_bins,
+        color=bar_color,
+        edgecolor='none',   # no bar border
+        rwidth=1.0,         # bars flush — no gap between them
+        linewidth=0,
     )
-    plt.title(
-        f"Distribution of Consecutive Gap Sizes (max_impute_gap={max_impute_gap})"
+
+    ax.set_title(
+        "Distribution of Gap Lengths — '%s'  (max_impute_gap=%d)"
+        % (target_col, max_impute_gap)
     )
-    plt.xlabel("Gap Length (Consecutive Missing Time Steps)")
-    plt.ylabel("Frequency (Number of Occurrences)")
-    plt.yscale("log")  # Log scale because there are many short gaps and few long gaps
-    plt.grid(True, alpha=0.3, axis="y")
-    sns.despine()
-    plt.tight_layout()
+    ax.set_xlabel("Gap Length (Consecutive Missing Time Steps)")
+    ax.set_ylabel("Frequency (Number of Occurrences)")
+    ax.set_yscale('log')
+    ax.grid(True, alpha=0.3, axis='y')
+    sns.despine(ax=ax)
+    fig.tight_layout()
 
     if save_plot_path:
-        plt.savefig(save_plot_path)
-        print(f"Saved histogram to {save_plot_path}")
+        import os
+        os.makedirs(os.path.dirname(save_plot_path), exist_ok=True)
+        fig.savefig(save_plot_path, dpi=150)
+        print("Saved histogram to " + save_plot_path)
 
     plt.show()
 
@@ -172,18 +235,22 @@ def characterize_gaps(
 def test_cointegration(df, target_col, proxy_col, alpha=0.05):
     """
     Performs the Engle-Granger two-step cointegration test to validate
-    the physical long-run equilibrium between the structural response and the proxy.
+    the physical long-run equilibrium between the structural response and
+    an environmental proxy.
 
-    Parameters:
-    - df: DataFrame containing both variables.
-    - target_col: The structural sensor column (e.g., inclination).
-    - proxy_col: The environmental proxy column (e.g., skin temperature).
-    - alpha: Significance level for the test (default 0.05).
+    Parameters
+    ----------
+    df : pd.DataFrame
+    target_col : str
+    proxy_col : str
+    alpha : float, optional
+        Significance level.  Default ``0.05``.
 
-    Returns:
-    - is_cointegrated (bool), p_value (float)
+    Returns
+    -------
+    is_cointegrated : bool
+    p_value : float
     """
-    # Drop rows where either column is missing
     df_clean = df.dropna(subset=[target_col, proxy_col])
 
     if len(df_clean) < 100:
@@ -191,101 +258,105 @@ def test_cointegration(df, target_col, proxy_col, alpha=0.05):
             "Insufficient overlapping data points to run a reliable cointegration test."
         )
 
-    # Perform Engle-Granger test
     score, p_value, _ = coint(df_clean[target_col], df_clean[proxy_col])
-    is_cointegrated = p_value < alpha
+    is_cointegrated   = p_value < alpha
 
-    print(f"\n--- Engle-Granger Cointegration Test ---")
-    print(f"Target: {target_col} | Proxy: {proxy_col}")
-    print(f"Test Statistic: {score:.4f}")
-    print(f"P-value: {p_value:.4e}")
+    print("\n--- Engle-Granger Cointegration Test ---")
+    print("Target: %s | Proxy: %s" % (target_col, proxy_col))
+    print("Test Statistic : %.4f" % score)
+    print("P-value        : %.4e" % p_value)
 
     if is_cointegrated:
-        print(
-            f"Result: Reject Null Hypothesis. The variables share a stationary long-run equilibrium."
-        )
+        print("Result: Reject H0 — variables share a stationary long-run equilibrium.")
     else:
-        print(
-            f"Result: Fail to reject Null Hypothesis. The proxy is NOT cointegrated with the target."
-        )
+        print("Result: Fail to reject H0 — proxy is NOT cointegrated with target.")
 
     return is_cointegrated, p_value
 
 
 def test_residual_stationarity(residuals, alpha=0.05):
     """
-    Tests structural residuals for stationarity using Augmented Dickey-Fuller (ADF).
-    This confirms that environmental noise has been adequately extracted.
+    Tests structural residuals for stationarity using ADF.
 
-    Parameters:
-    - residuals: A pandas Series or array of model residuals.
-    - alpha: Significance level (default 0.05).
+    Parameters
+    ----------
+    residuals : pd.Series or array-like
+    alpha : float, optional
+        Significance level.  Default ``0.05``.
 
-    Returns:
-    - is_stationary (bool), p_value (float)
+    Returns
+    -------
+    is_stationary : bool
+    p_value : float
     """
-    res_clean = pd.Series(residuals).dropna()
-
+    res_clean  = pd.Series(residuals).dropna()
     adf_result = adfuller(res_clean)
-    p_value = adf_result[1]
+    p_value    = adf_result[1]
     is_stationary = p_value < alpha
 
-    print(f"\n--- ADF Stationarity Test ---")
-    print(f"Test Statistic: {adf_result[0]:.4f}")
-    print(f"P-value: {p_value:.4e}")
+    print("\n--- ADF Stationarity Test ---")
+    print("Test Statistic : %.4f" % adf_result[0])
+    print("P-value        : %.4e" % p_value)
 
     if is_stationary:
-        print(
-            f"Result: Residuals are stationary (I(0)). Suitable for control chart monitoring."
-        )
+        print("Result: Residuals are stationary (I(0)). Suitable for control chart monitoring.")
     else:
-        print(f"Result: Residuals are non-stationary. Decomposition may be incomplete.")
+        print("Result: Residuals are non-stationary. Decomposition may be incomplete.")
 
     return is_stationary, p_value
 
 
 def test_residual_whiteness(residuals, lags=10, alpha=0.05):
     """
-    Tests residuals for white noise (absence of autocorrelation) using Ljung-Box.
+    Tests residuals for white noise using Ljung-Box.
 
-    Parameters:
-    - residuals: A pandas Series or array of model residuals.
-    - lags: Number of lags to test (default 10).
-    - alpha: Significance level (default 0.05).
+    Parameters
+    ----------
+    residuals : pd.Series or array-like
+    lags : int, optional
+        Number of lags to test.  Default ``10``.
+    alpha : float, optional
+        Significance level.  Default ``0.05``.
 
-    Returns:
-    - is_white (bool), p_value (float)
+    Returns
+    -------
+    is_white : bool
+    p_value : float
     """
     res_clean = pd.Series(residuals).dropna()
-
     lb_result = acorr_ljungbox(res_clean, lags=[lags], return_df=True)
-    p_value = lb_result["lb_pvalue"].iloc[0]
-    is_white = p_value > alpha
+    p_value   = lb_result['lb_pvalue'].iloc[0]
+    is_white  = p_value > alpha
 
-    print(f"\n--- Ljung-Box Whiteness Test (Lags={lags}) ---")
-    print(f"Test Statistic: {lb_result['lb_stat'].iloc[0]:.4f}")
-    print(f"P-value: {p_value:.4e}")
+    print("\n--- Ljung-Box Whiteness Test (Lags=%d) ---" % lags)
+    print("Test Statistic : %.4f" % lb_result['lb_stat'].iloc[0])
+    print("P-value        : %.4e" % p_value)
 
     if is_white:
-        print(f"Result: Residuals are white noise (No significant autocorrelation).")
+        print("Result: Residuals are white noise (no significant autocorrelation).")
     else:
-        print(f"Result: Residuals show significant autocorrelation.")
+        print("Result: Residuals show significant autocorrelation.")
 
     return is_white, p_value
 
+
 def test_signal_stationarity(df, cols, alpha=0.05):
     """
-    Runs the Augmented Dickey-Fuller test on a list of columns to determine
-    their integration order. Used to justify the choice of Pearson correlation
-    (I(0) signals) vs. cointegration testing (I(1) signals).
+    Runs ADF on a list of columns to determine their integration order.
 
-    Parameters:
-    - df: DataFrame with a DatetimeIndex.
-    - cols: List of column names to test.
-    - alpha: Significance level (default 0.05).
+    Used to justify Pearson correlation (I(0)) vs. cointegration testing (I(1)).
 
-    Returns:
-    - results: DataFrame with ADF statistic, p-value, and stationarity verdict per column.
+    Parameters
+    ----------
+    df : pd.DataFrame
+    cols : list of str
+    alpha : float, optional
+        Significance level.  Default ``0.05``.
+
+    Returns
+    -------
+    pd.DataFrame
+        ADF statistic, p-value, and verdict per column.
     """
     records = []
     for col in cols:
@@ -296,7 +367,7 @@ def test_signal_stationarity(df, cols, alpha=0.05):
                 'ADF Statistic': None,
                 'p-value': None,
                 'Stationary (I(0))': None,
-                'Decision': 'Insufficient data'
+                'Decision': 'Insufficient data',
             })
             continue
         adf_stat, p_value, _, _, _, _ = adfuller(series, autolag='AIC')
@@ -306,70 +377,87 @@ def test_signal_stationarity(df, cols, alpha=0.05):
             'ADF Statistic': round(adf_stat, 4),
             'p-value': round(p_value, 6),
             'Stationary (I(0))': is_stationary,
-            'Decision': 'Proceed with Pearson' if is_stationary else '⚠ Difference or test cointegration'
+            'Decision': 'Proceed with Pearson' if is_stationary
+                        else '\u26a0 Difference or test cointegration',
         })
-        print(f"{col:50s}  ADF={adf_stat:8.4f}  p={p_value:.4e}  {'✓ I(0)' if is_stationary else '✗ I(1)'}")
+        print("%-50s  ADF=%8.4f  p=%.4e  %s"
+              % (col, adf_stat, p_value, '\u2713 I(0)' if is_stationary else '\u2717 I(1)'))
 
     return pd.DataFrame(records).set_index('Variable')
 
+
 def get_longest_contiguous_block(df, target_col, expected_step='1h'):
     """
-    Identifies the start and end timestamps of the longest contiguous 
-    non-missing block of the target variable.
-    
-    Parameters:
-    - df: DataFrame with a DatetimeIndex.
-    - target_col: Structural target column.
-    - expected_step: Target frequency string (default '1h').
-    
-    Returns:
-    - ref_start: Start timestamp of longest block.
-    - ref_end: End timestamp of longest block.
-    """
-    target_series = df[target_col].dropna()
-    expected_step_td = pd.Timedelta(expected_step)
-    
-    time_diffs = target_series.index.to_series().diff()
-    breaks = time_diffs[time_diffs > expected_step_td * 1.5].index
+    Identifies the start and end timestamps of the longest contiguous
+    non-missing block of ``target_col``.
 
-    block_starts = [target_series.index[0]] + list(breaks)
-    block_ends   = list(breaks - expected_step_td) + [target_series.index[-1]]
-    block_lengths_h = [(e - s).total_seconds() / 3600 for s, e in zip(block_starts, block_ends)]
+    Parameters
+    ----------
+    df : pd.DataFrame
+    target_col : str
+    expected_step : str, optional
+        Target frequency string.  Default ``'1h'``.
+
+    Returns
+    -------
+    ref_start : pd.Timestamp
+    ref_end : pd.Timestamp
+    """
+    target_series    = df[target_col].dropna()
+    expected_step_td = pd.Timedelta(expected_step)
+
+    time_diffs = target_series.index.to_series().diff()
+    breaks     = time_diffs[time_diffs > expected_step_td * 1.5].index
+
+    block_starts    = [target_series.index[0]] + list(breaks)
+    block_ends      = list(breaks - expected_step_td) + [target_series.index[-1]]
+    block_lengths_h = [(e - s).total_seconds() / 3600
+                       for s, e in zip(block_starts, block_ends)]
 
     longest_idx = int(pd.Series(block_lengths_h).idxmax())
     ref_start   = block_starts[longest_idx]
     ref_end     = block_ends[longest_idx]
-    
-    print(f"Longest contiguous block : {ref_start} → {ref_end}")
-    print(f"Duration                 : {block_lengths_h[longest_idx]:.0f} h "
-          f"({block_lengths_h[longest_idx] / 24:.1f} days)")
-          
+
+    print("Longest contiguous block : %s \u2192 %s" % (ref_start, ref_end))
+    print("Duration                 : %.0f h (%.1f days)"
+          % (block_lengths_h[longest_idx], block_lengths_h[longest_idx] / 24))
+
     return ref_start, ref_end
+
 
 def screen_optimal_lags(df_diff, target, proxies, max_lag_h, lag_step):
     """
-    Screens optimal thermal inertia lags across multiple proxies using shift_and_correlate.
-    
-    Returns:
-    - optimal_lags: dict mapping proxy name to optimal lag
-    - all_lags: list of lag tested
-    - corrs_dict: dict mapping proxy name to correlation array
+    Screens optimal thermal-inertia lags across multiple proxies.
+
+    Parameters
+    ----------
+    df_diff : pd.DataFrame
+    target : str
+    proxies : list of str
+    max_lag_h : int
+    lag_step : int
+
+    Returns
+    -------
+    optimal_lags : dict
+    all_lags : list
+    corrs_dict : dict
     """
     optimal_lags = {}
-    corrs_dict = {}
-    all_lags = None
-    
+    corrs_dict   = {}
+    all_lags     = None
+
     for proxy in proxies:
         lags, corrs = shift_and_correlate(df_diff, target, proxy, max_lag_h, lag_step)
         if all_lags is None:
             all_lags = lags
-            
-        max_idx = np.argmax(np.abs(corrs))
-        best_lag = lags[max_idx]
+
+        max_idx  = np.argmax(np.abs(corrs))
+        best_lag  = lags[max_idx]
         best_corr = corrs[max_idx]
-        
+
         optimal_lags[proxy] = best_lag
-        corrs_dict[proxy] = corrs
-        print(f"{proxy}: Optimal Lag = {best_lag}h, r = {best_corr:.3f}")
-        
+        corrs_dict[proxy]   = corrs
+        print("%s: Optimal Lag = %dh, r = %.3f" % (proxy, best_lag, best_corr))
+
     return optimal_lags, all_lags, corrs_dict

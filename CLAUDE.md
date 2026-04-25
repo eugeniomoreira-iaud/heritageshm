@@ -118,3 +118,137 @@ When generating new output cells, follow this convention. The station identifier
 
 ### Primary User Parameter: `TARGET_STATION`
 All notebooks are parameterized around `TARGET_STATION` (e.g., `'st02'`). This string controls which sensor file is loaded and which output files are named. It is always defined near the top of each notebook as a clearly marked user input. When modifying notebooks, never hardcode a station identifier — always reference `TARGET_STATION`.
+
+---
+
+## Coding Conventions
+
+### Notebook Structure Standard (Notebooks 01–04)
+
+Notebooks 01 through 04 form the **transferable core pipeline**. They are designed to work with any static structural sensor dataset and any compatible environmental proxy dataset — not only the Gubbio case. When writing or modifying these notebooks, preserve this generality: never hardcode site-specific values, units, or assumptions.
+
+Every notebook in the 01–04 sequence must follow this internal structure:
+
+**1. Title cell (Markdown)**
+The first cell must be a Markdown title block containing:
+- The notebook number and descriptive title as an H1 heading.
+- A one-paragraph statement of the notebook's goal within the overall pipeline.
+- A numbered list of the steps the notebook executes, matching the step headers used throughout.
+
+Example pattern (from Notebook 01):
+```markdown
+# Notebook 01 · Data Quality, Proxies, and Gap Characterization
+
+This notebook executes **Phase A, Step 1** of the `heritageshm` pipeline:
+
+1. **Sensor Loading** — Load the preprocessed sensor CSV from Notebook 00.
+2. **Proxy Loading** — Load environmental proxy data and select relevant columns.
+3. **Alignment** — Resample and synchronize proxies onto the sensor index.
+4. **Gap Characterization** — Classify missing data and diagnose gap taxonomy.
+5. **Save** — Export the aligned dataset to `/data/interim/aligned/`.
+```
+
+**2. Imports cell (Code)**
+One code cell containing all imports and `apply_theme()`. No logic, no parameters.
+
+**3. Step cells (alternating Markdown + Code)**
+Each step consists of:
+- A Markdown header cell (`## Step N · Name`) containing:
+  - A plain-language description of what the step does.
+  - A **Parameter Tuning Guidance** subsection (`### Parameter Tuning Guidance`) that documents every user-facing parameter in the following code cell: its name, purpose, accepted values, default, and effect on downstream steps.
+- One or more code cells implementing the step by calling library functions. Complex logic must not be written inline — it belongs in a module.
+
+**4. Save / export cell**
+The final step must always save all outputs required by the next notebook. Saves must be gated on a success boolean (e.g., `if step_ok: save(...)`) so that partial failures do not silently produce corrupt files.
+
+**5. No inline complex logic**
+Notebook cells must not contain multi-function algorithms, statistical tests, or model fitting code written directly in the cell. All such logic must be encapsulated in a function in the appropriate `heritageshm/` module and called from the notebook. A cell should read like an orchestration script, not an implementation.
+
+---
+
+### Notebook 00 — Special Status
+
+`00_Sensor_Preprocessing.ipynb` is intentionally **ad hoc** and site-specific. It encodes the particular raw data format, column layout, file extension, and compensation coefficients of the author's on-site inclinometer system (`.adc` files, tab-separated, temperature-compensation coefficient). It is not expected to be transferable without modification. When working on Notebook 00:
+- Do not attempt to generalise it to match the 01–04 pattern.
+- Parameters such as `COMP_COEFF`, `STATIONS`, `SEPARATOR`, and `FILE_EXT` are site-specific and must be updated by the user for a new deployment.
+- Its output (`{station}_preprocessed.csv` in `data/interim/sensor/`) is the standard entry point for the transferable pipeline starting at Notebook 01.
+
+---
+
+### Expected Dataset Contracts (Notebooks 01–04)
+
+The transferable pipeline (01–04) expects two input datasets with the following structure. Any new sensor or proxy dataset must conform to these contracts before being fed into the pipeline.
+
+**Sensor dataset** (`data/interim/sensor/{station}_preprocessed.csv`)
+- Produced by Notebook 00 (or any equivalent preprocessing step).
+- A CSV file with a `datetime` column parseable as a `DatetimeIndex`.
+- At minimum one structural response column (e.g., `absinc` for absolute inclination). Column name is user-configurable via `TARGET_COL`.
+- Regular or near-regular time steps (gaps allowed; the pipeline handles them). Typical resolution: hourly or sub-hourly.
+- Units: SI or consistent engineering units. No requirement for specific units, but units must be consistent across the full series.
+- No pre-imputation expected: the pipeline assumes this file contains NaN where data is missing.
+
+**Proxy dataset** (`data/raw/proxies/{name}.csv`)
+- A CSV file with a datetime column named `datetime (UTC)`, parseable as a `DatetimeIndex`.
+- One or more environmental variable columns. Column names and units are user-configurable via `PROXY_COLS`.
+- Must cover the full temporal window of the sensor dataset (checked explicitly in Notebook 01 before alignment).
+- Typical sources: ERA5-Land reanalysis (skin temperature, solar radiation), local weather station exports, or any reanalysis provider (e.g., Oikolab). The pipeline does not assume a specific source.
+- Resolution: hourly or finer. The pipeline resamples to `TARGET_FREQ` during alignment.
+- Metadata columns (coordinates, model name, elevation, UTC offset) are automatically dropped during loading in Notebook 01 if listed in `META_COLS`.
+
+---
+
+### Module Coding Standard (`heritageshm/`)
+
+**Module-level docstring**
+Every `.py` file in `heritageshm/` must begin with a module-level docstring that states: (1) the module name, (2) its responsibility within the pipeline, and (3) its primary inputs and outputs. Example:
+
+```python
+"""
+Module: diagnostics.py
+Handles gap taxonomy characterization, cointegration testing,
+and residual diagnostics (ADF, Ljung-Box).
+"""
+```
+
+**Function-level docstrings (mandatory)**
+Every public function must have a NumPy-style or Google-style docstring containing:
+- A one-line summary of what the function does.
+- `Parameters` section: name, type, description, and default for every argument.
+- `Returns` section: type and description of every return value.
+- Any side effects (e.g., saves a file, prints to stdout) must be noted.
+
+Example pattern (already used in `diagnostics.py`):
+```python
+def test_cointegration(df, target_col, proxy_col, alpha=0.05):
+    """
+    Performs the Engle-Granger two-step cointegration test to validate
+    the physical long-run equilibrium between the structural response and the proxy.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame containing both variables.
+    target_col : str
+        The structural sensor column (e.g., 'absinc').
+    proxy_col : str
+        The environmental proxy column (e.g., 'skin_temperature (degC)').
+    alpha : float, optional
+        Significance level for the test. Default 0.05.
+
+    Returns
+    -------
+    is_cointegrated : bool
+        True if the null hypothesis of no cointegration is rejected.
+    p_value : float
+        P-value from the Engle-Granger test.
+    """
+```
+
+**No logic in notebooks**
+If a block of code in a notebook cell is longer than ~10 lines, performs a statistical test, trains a model, or produces a figure, it must be refactored into a named function in the appropriate module. The notebook cell then becomes a single function call with named arguments.
+
+**No hardcoded paths in modules**
+Module functions must never hardcode file paths. All paths must be passed as arguments. Modules are path-agnostic; notebooks control all I/O paths.
+
+**No side effects without explicit opt-in**
+Functions that save files or produce plots must have an optional parameter (e.g., `save_plot_path=None`) that defaults to no side effect. The notebook controls whether outputs are saved.

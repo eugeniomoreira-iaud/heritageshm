@@ -101,7 +101,7 @@ for c in _sample.columns:
 PROXY_COLS = [
     'temperature (degC)',
     'dewpoint_temperature (degC)',
-    'relative_humidity (0-1)',          # hygrothermal — keep for masonry
+    'relative_humidity (0-1)',
     'wetbulb_temperature (degC)',
     'skin_temperature (degC)',
     'urban_temperature (degC)',
@@ -195,7 +195,7 @@ if proxies_dict:
         df_sensor,
         proxies_dict,
         resample_freq=TARGET_FREQ,
-        add_prefix=True,   # prevents name collisions with multiple proxy sources
+        add_prefix=False,   # prevents name collisions with multiple proxy sources
     )
 else:
     print("No proxies loaded. Proceeding with sensor data only.")
@@ -280,7 +280,6 @@ os.makedirs('outputs/figures', exist_ok=True)
 os.makedirs('outputs/tables',  exist_ok=True)
 os.makedirs(os.path.dirname(ALIGNED_PATH), exist_ok=True)
 
-# %%
 gap_characterization_ok = False
 
 try:

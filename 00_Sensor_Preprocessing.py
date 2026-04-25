@@ -39,6 +39,9 @@
 # ## Import libraries
 
 # %%
+# %load_ext autoreload
+# %autoreload 2
+
 import sys
 import os
 import glob
@@ -201,8 +204,8 @@ for st, df_st in stations_dict.items():
 
 # %%
 VIZ_STATION      = 'st02'
-VIZ_START        = '2021-01-01'
-VIZ_END          = '2021-02-01'
+VIZ_START        = None
+VIZ_END          = None
 DOT_SIZE         = 2
 DROPPED_DOT_SIZE = None   # None = DOT_SIZE * 4
 

@@ -85,7 +85,7 @@ LAT          = 43.35343
 LON          = 12.582047
 START        = '2018-01-01'
 END          = '2026-04-25'
-API_KEY      = '8426a7e187b9481ab575814f707c8f8d'
+API_KEY      = '97efb218e1814a47abfff249488f6dfc'
 OUTPUT_PATH  = '../data/raw/proxies/oikolab_weather.csv'
 CHUNK_MONTHS = 6   # 6 months x 10 params ~ 60 units (limit is 500)
 # ==================

@@ -11,9 +11,9 @@ class JupytextSyncHandler(FileSystemEventHandler):
         
         filepath = event.src_path
         
-        # Ignore the 'old' directory
+        # Ignore the 'old' and 'heritageshm' directories
         path_parts = os.path.normpath(filepath).split(os.sep)
-        if 'old' in path_parts:
+        if 'old' in path_parts or 'heritageshm' in path_parts:
             return
         
         # Only trigger on .ipynb or .py files
@@ -41,8 +41,8 @@ def initialize_pairs():
     count = 0
     # Walk through all directories
     for root, dirs, files in os.walk('.'):
-        # Skip the 'old' directory and hidden directories
-        dirs[:] = [d for d in dirs if d != 'old' and not d.startswith('.')]
+        # Skip the 'old', 'heritageshm' directories and hidden directories
+        dirs[:] = [d for d in dirs if d not in ['old', 'heritageshm'] and not d.startswith('.')]
         
         for file in files:
             if file.endswith('.ipynb') and "checkpoint" not in file:

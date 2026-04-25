@@ -1,26 +1,25 @@
 name: neuralprophet_env
 channels:
-  - conda-forge
   - defaults
+
 dependencies:
-  - python=3.11
-  - pip
+  - python=3.10
   - ipykernel
-  - jupyter
-  - jupyterlab
-  - jupyterlab-git
-  - jupytext
   - tqdm
+  - statsmodels
+  - requests
+  - matplotlib
   - numpy
   - pandas
   - scipy
-  - statsmodels
-  - matplotlib
   - seaborn
-  - scikit-learn
-  - xgboost
-  - requests
   - jinja2
+  - jupyter
+  - jupyterlab-github
+  - jupyterlab-git
+  - jupytext
+  - xgboost
+  - scikit-learn
   - watchdog
   - pip:
     - neuralprophet

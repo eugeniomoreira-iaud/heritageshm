@@ -18,15 +18,22 @@
 #
 # **Goal:** Extract, clean, and temperature-compensate raw on-site sensor data.
 #
+# The three independent disturbance phenomena handled by this notebook:
+#
+# | Phenomenon | Nature | Filter |
+# |---|---|---|
+# | Power outage | Rows exist but `charge == 0`; signal reads `0` (hardware artefact) | Step 3a: removed first, before any signal analysis |
+# | Sudden spikes | One or more readings anomalously far from local signal context | Step 3b: rolling-median context filter |
+# | Temperature drift | Slow thermal bias on the structural reading | Step 3c: linear thermal compensation |
+#
 # **Steps:**
-# 1. **File Inspection** — Examine one raw file before loading to confirm delimiter and column layout.
-# 2. **Data Loading** — Read all raw sensor files from `/data/raw/sensor/`.
-# 3. **Signal Cleaning and Compensation** — Remove power-loss rows, apply a gap-aware spike
-#    filter (differences across NaN / zero-charge boundaries are excluded), and apply the
-#    on-board temperature compensation coefficient.
-# 4. **Compensation Visualisation** — Plot raw vs. compensated signal and the applied
-#    correction, with dropped values highlighted.
-# 5. **Save** — Export cleaned, standardized datasets to `/data/interim/sensor/`.
+# 1. **File Inspection** — Examine one raw file before loading.
+# 2. **Data Loading** — Read all raw sensor files from `data/raw/sensor/`.
+# 3. **Signal Cleaning and Compensation** — Power-loss removal → spike removal
+#    (rolling-median context filter) → temperature compensation.
+# 4. **Compensation Visualisation** — Plot raw vs. compensated signal with
+#    dropped values highlighted.
+# 5. **Save** — Export cleaned datasets to `data/interim/sensor/`.
 
 # %% [markdown]
 # ## Import libraries
@@ -47,15 +54,15 @@ apply_theme(context='notebook')
 # %% [markdown]
 # ## Step 1 · File Inspection
 #
-# Inspect one representative raw file to confirm the delimiter, column count, and date format
-# before loading the entire directory.
+# Inspect one representative raw file to confirm the delimiter, column count,
+# and date format before loading the entire directory.
 #
 # ### Parameter Tuning Guidance
 #
-# | Parameter | Purpose | Accepted values | Default | Notes |
-# |---|---|---|---|---|
-# | `RAW_FOLDER` | Path to the directory containing raw sensor files | Any valid path string | `'data/raw/sensor'` | Relative to repo root |
-# | `FILE_EXT` | Extension of the raw sensor files | Any string (e.g. `'.adc'`, `'.csv'`) | `'.adc'` | Must match exactly (case-sensitive on Linux) |
+# | Parameter | Purpose | Accepted values | Default |
+# |---|---|---|---|
+# | `RAW_FOLDER` | Path to raw sensor files | Any valid path string | `'data/raw/sensor'` |
+# | `FILE_EXT` | Extension of raw files | Any string (e.g. `'.adc'`, `'.csv'`) | `'.adc'` |
 
 # %%
 RAW_FOLDER = 'data/raw/sensor'
@@ -71,16 +78,17 @@ else:
 # %% [markdown]
 # ## Step 2 · Load Raw Sensor Files
 #
-# Read all files in the raw sensor directory and organise them into per-station DataFrames.
+# Read all files in the raw sensor directory and organise them into
+# per-station DataFrames.
 #
 # ### Parameter Tuning Guidance
 #
-# | Parameter | Purpose | Accepted values | Default | Notes |
-# |---|---|---|---|---|
-# | `SEPARATOR` | Column delimiter in the raw files | `'\\t'` (tab), `';'`, `','` | `'\\t'` | Use the value reported by Step 1 inspection |
-# | `DECIMAL_COMMA` | Whether values use a comma as decimal separator | `True` / `False` | `True` | Set `True` for European formats (e.g. `3,14`); `False` for Anglo (e.g. `3.14`) |
-# | `HEADER` | Row index of the header, or `None` if no header | `0`, `None` | `None` | Use the value reported by Step 1 inspection |
-# | `STATIONS` | Mapping of station IDs to their ordered column names | `dict[str, list[str]]` | see below | `None` entries skip a column position; order must match the file layout |
+# | Parameter | Purpose | Accepted values | Default |
+# |---|---|---|---|
+# | `SEPARATOR` | Column delimiter | `'\\t'`, `';'`, `','` | `'\\t'` |
+# | `DECIMAL_COMMA` | Comma as decimal separator? | `True` / `False` | `True` |
+# | `HEADER` | Header row index or `None` | `0`, `None` | `None` |
+# | `STATIONS` | Station IDs → ordered column names | `dict[str, list[str]]` | see below |
 
 # %%
 SEPARATOR     = '\t'
@@ -114,31 +122,47 @@ print(f'Organised {len(stations_dict)} station(s): {list(stations_dict.keys())}'
 # %% [markdown]
 # ## Step 3 · Signal Cleaning and Temperature Compensation
 #
-# For each station, `process_station()` executes three operations in sequence:
-# 1. **Gap-aware spike filter:** computes |\u0394y| only on *valid consecutive pairs*
-#    (pairs where neither the current nor the previous sample is NaN or zero).
-#    This prevents gap boundaries from being mistakenly flagged as spikes — a common
-#    issue in datasets with frequent data outages.
-# 2. **Power-loss removal:** drops rows where battery charge equals zero.
-# 3. **Temperature compensation:** applies linear thermal correction using `COMP_COEFF`
-#    and normalizes the series so it starts at 0.  The raw signal is preserved as
-#    `{SIGNAL_COL}_raw` in the saved CSV to support later visualisation.
+# `process_station()` runs the four-stage physical pipeline in the correct order:
+#
+# 1. **Power-loss removal** — rows where `charge == 0` are hardware artefacts and
+#    are removed *first*, before the spike filter sees any signal values.  This
+#    guarantees that outage zeros never enter the rolling-median window and cannot
+#    corrupt spike classification.
+#
+# 2. **Spike removal (rolling-median context filter)** — each sample is compared
+#    against the *local median* of its nearest valid neighbours (within ±`SPIKE_WINDOW`
+#    positions).  This correctly handles:
+#    - **Isolated spikes**: large deviation on both sides → removed.
+#    - **Post-outage spike runs**: all spike rows deviate from pre-outage AND
+#      post-recovery context → removed.  The first clean recovery reading is
+#      close to its right-side neighbours → kept.
+#    - **Gap boundaries**: not enough valid neighbours → skipped (kept).
+#
+# 3. **Temperature compensation** — linear thermal correction using `COMP_COEFF`.
+#    Applied to the clean signal only.  Uses the first reading as the thermal
+#    baseline (trustworthy after steps 1 and 2).
+#
+# 4. **Normalisation** — series shifted so it starts at 0.
 #
 # ### Parameter Tuning Guidance
 #
-# | Parameter | Purpose | Accepted values | Default | Notes |
+# | Parameter | Purpose | Type | Default | Notes |
 # |---|---|---|---|---|
-# | `SIGNAL_COL` | Structural response column to clean and compensate | Any string matching a column in `STATIONS` | `'absinc'` | Must exist in every station defined in `STATIONS` |
-# | `TEMP_COL` | On-board temperature column used for compensation | Any string | `'temp'` | Must exist in every station |
-# | `COMP_COEFF` | Thermal compensation coefficient (mdeg \u00b7 \u00b0C\u207b\u00b9 \u00b7 10\u207b\u00b3) | `float` | `0.005` | Update from your sensor calibration sheet; larger values = stronger correction |
-# | `SPIKE_THRESHOLD` | Max allowed |\u0394y| between *valid consecutive* samples (mdeg) | `float > 0` | `500.0` | Only differences between non-NaN, non-zero adjacent samples are checked; set conservatively large first and review the dropped CSV before tightening |
-# | `OUTPUT_DIR` | Destination directory for interim CSVs | Any valid path string | `'data/interim/sensor'` | Created automatically if it does not exist |
+# | `SIGNAL_COL` | Structural signal column | `str` | `'absinc'` | Must exist in every station |
+# | `TEMP_COL` | Temperature column | `str` | `'temp'` | Must exist in every station |
+# | `COMP_COEFF` | Thermal coefficient (mdeg·°C⁻¹·10⁻³) | `float` | `0.005` | From sensor calibration sheet |
+# | `SPIKE_THRESHOLD` | Max deviation from local median (mdeg) | `float > 0` | `500.0` | Start large, review dropped CSV, then tighten |
+# | `SPIKE_WINDOW` | Half-window: valid neighbours on each side | `int ≥ 1` | `7` | Larger = smoother reference; smaller = more local |
+# | `SPIKE_MIN_VALID` | Min neighbours required to evaluate a point | `int ≥ 1` | `3` | Points with fewer neighbours are always kept |
+# | `OUTPUT_DIR` | Interim CSV destination | `str` | `'data/interim/sensor'` | Created automatically |
 
 # %%
 SIGNAL_COL       = 'absinc'
 TEMP_COL         = 'temp'
-COMP_COEFF       = 0.005       # mdeg \u00b7 \u00b0C\u207b\u00b9 \u00b7 10\u207b\u00b3 \u2014 update from calibration sheet
-SPIKE_THRESHOLD  = 500.0       # mdeg \u2014 applied only to valid consecutive pairs (gap-aware)
+COMP_COEFF       = 0.005      # mdeg · °C⁻¹ · 10⁻³ — update from calibration sheet
+SPIKE_THRESHOLD  = 500.0      # mdeg — deviation from local rolling median
+SPIKE_WINDOW     = 7          # valid neighbours on each side
+SPIKE_MIN_VALID  = 3          # minimum neighbours to evaluate a sample
 OUTPUT_DIR       = 'data/interim/sensor'
 
 processed = {}
@@ -152,34 +176,35 @@ for st, df_st in stations_dict.items():
         comp_coeff=COMP_COEFF,
         spike_threshold=SPIKE_THRESHOLD,
         output_dir=OUTPUT_DIR,
+        window=SPIKE_WINDOW,
+        min_valid=SPIKE_MIN_VALID,
     )
     processed[st] = df_clean
 
 # %% [markdown]
 # ## Step 4 · Compensation Visualisation
 #
-# `plot_compensation_comparison()` reads directly from the saved interim CSV so it can
-# be called independently at any time — including outside this notebook — to inspect
-# any station.
+# `plot_compensation_comparison()` loads the saved interim CSV directly so it
+# can be called at any time to inspect any station.
 #
-# Dropped rows are overlaid on the signal panel in distinct colours:
+# Dropped rows are overlaid in distinct colours:
 # **crimson** = spike removals; **darkviolet** = power-loss removals.
 #
 # ### Parameter Tuning Guidance
 #
 # | Parameter | Purpose | Accepted values | Default | Notes |
 # |---|---|---|---|---|
-# | `VIZ_STATION` | Station to inspect | Any key in `STATIONS` | `'st02'` | Changes which interim CSV is loaded |
-# | `VIZ_START` / `VIZ_END` | Date zoom window | `'YYYY-MM-DD'` string or `None` | `None` | Set both to `None` to show the full series; narrow the window to inspect specific events |
-# | `DOT_SIZE` | Marker size for the main signal scatter | `float > 0` | `2` | Reduce for dense datasets; increase for sparse ones |
-# | `DROPPED_DOT_SIZE` | Marker size for dropped-value overlay | `float > 0` or `None` | `None` (= `DOT_SIZE * 4`) | Set explicitly to control visibility of dropped points relative to the main cloud |
+# | `VIZ_STATION` | Station to inspect | Any key in `STATIONS` | `'st02'` | |
+# | `VIZ_START` / `VIZ_END` | Zoom window | `'YYYY-MM-DD'` or `None` | `None` | `None` = full series |
+# | `DOT_SIZE` | Marker size for main signal scatter | `float > 0` | `2` | |
+# | `DROPPED_DOT_SIZE` | Marker size for dropped-value overlay | `float > 0` or `None` | `None` (= `DOT_SIZE × 4`) | Set explicitly to override |
 
 # %%
-VIZ_STATION       = 'st02'
-VIZ_START         = '2021-01-01'    # e.g. '2020-06-01' \u2014 or None for no lower bound
-VIZ_END           = '2021-02-01'    # e.g. '2021-03-31' \u2014 or None for no upper bound
-DOT_SIZE          = 2
-DROPPED_DOT_SIZE  = None            # None = DOT_SIZE * 4; set a float to override
+VIZ_STATION      = 'st02'
+VIZ_START        = '2021-01-01'
+VIZ_END          = '2021-02-01'
+DOT_SIZE         = 2
+DROPPED_DOT_SIZE = None   # None = DOT_SIZE * 4
 
 viz_file     = os.path.join(OUTPUT_DIR, f'{VIZ_STATION}_preprocessed.csv')
 dropped_file = os.path.join(OUTPUT_DIR, f'{VIZ_STATION}_dropped.csv')

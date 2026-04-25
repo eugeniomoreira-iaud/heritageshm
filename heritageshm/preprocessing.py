@@ -20,6 +20,8 @@ import pandas as pd
 import numpy as np
 import os
 
+_SEP = '\u2500' * 50   # separator line used in print banners
+
 
 # ──────────────────────────────────────────────────────────────────────
 def clean_signal_robust(
@@ -96,22 +98,22 @@ def clean_signal_robust(
             df_power['drop_reason'] = 'power_loss'
             dropped_frames.append(df_power)
             df_clean = df_clean[~power_mask]
-            print(f"  Dropped {n_power:>7} power-loss rows "
-                  f"(zero charge in '{valid_charge_col}')")
+            print("  Dropped %7d power-loss rows (zero charge in '%s')"
+                  % (n_power, valid_charge_col))
 
     # ── Step 2: rolling-median context spike filter ──────────────────────────
     if signal_col not in df_clean.columns:
-        print(f"  WARNING: signal column '{signal_col}' not found — "
-              f"spike filter skipped.")
+        print("  WARNING: signal column '%s' not found — spike filter skipped."
+              % signal_col)
     else:
         sig = pd.to_numeric(df_clean[signal_col], errors='coerce')
 
         # Work only on the valid (non-NaN) values; keep their original index
         # positions so we can map results back to df_clean.
         valid_mask = sig.notna()
-        valid_vals  = sig[valid_mask].values          # 1-D array of valid values
-        valid_pos   = np.where(valid_mask)[0]         # integer positions in sig
-        n_valid     = len(valid_vals)
+        valid_vals = sig[valid_mask].values       # 1-D array of valid values
+        valid_pos  = np.where(valid_mask)[0]      # integer positions in sig
+        n_valid    = len(valid_vals)
 
         spike_flag = np.zeros(n_valid, dtype=bool)
 
@@ -140,15 +142,15 @@ def clean_signal_robust(
             df_spikes['drop_reason'] = 'spike'
             dropped_frames.append(df_spikes)
             df_clean = df_clean.drop(index=spike_index)
-            print(f"  Dropped {n_spikes:>7} spike rows  "
-                  f"(|deviation from local median| > {spike_threshold}, "
-                  f"window={window}, min_valid={min_valid})")
+            print("  Dropped %7d spike rows  "
+                  "(|deviation from local median| > %s, window=%d, min_valid=%d)"
+                  % (n_spikes, spike_threshold, window, min_valid))
         else:
-            print(f"  No spikes detected  "
-                  f"(threshold={spike_threshold}, window={window})")
+            print("  No spikes detected  (threshold=%s, window=%d)"
+                  % (spike_threshold, window))
 
     retained_pct = 100 * len(df_clean) / n0 if n0 else 0.0
-    print(f"  Retained {len(df_clean):>7} / {n0} rows ({retained_pct:.1f} %)")
+    print("  Retained %7d / %d rows (%.1f %%)" % (len(df_clean), n0, retained_pct))
 
     df_dropped = (
         pd.concat(dropped_frames)
@@ -221,11 +223,11 @@ def process_station(
     """
     os.makedirs(output_dir, exist_ok=True)
 
-    print(f"\n{'\u2500' * 50}")
-    print(f"  Station : {st}  |  raw rows: {len(df_st)}")
-    print(f"  Filter  : rolling-median  window={window}  "
-          f"min_valid={min_valid}  threshold={spike_threshold}")
-    print(f"{'\u2500' * 50}")
+    print("\n" + _SEP)
+    print("  Station : %s  |  raw rows: %d" % (st, len(df_st)))
+    print("  Filter  : rolling-median  window=%d  min_valid=%d  threshold=%s"
+          % (window, min_valid, spike_threshold))
+    print(_SEP)
 
     # Steps 1 & 2: power-loss removal then spike filter
     df_clean, df_dropped = clean_signal_robust(
@@ -237,37 +239,37 @@ def process_station(
         valid_charge_col='charge',
     )
 
-    # Step 3 & 4: temperature compensation + normalisation
+    # Steps 3 & 4: temperature compensation + normalisation
     if df_clean.empty:
-        print(f"  WARNING: no rows remain after cleaning — "
-              f"compensation skipped. Review spike_threshold / window.")
+        print("  WARNING: no rows remain after cleaning — "
+              "compensation skipped. Review spike_threshold / window.")
     elif signal_col in df_clean.columns and temp_col in df_clean.columns:
-        df_clean[f'{signal_col}_raw'] = df_clean[signal_col].copy()
+        df_clean[signal_col + '_raw'] = df_clean[signal_col].copy()
         df_clean = apply_compensation(
             df=df_clean,
             target_col=signal_col,
-            new_col_name=f'{signal_col}_comp',
+            new_col_name=signal_col + '_comp',
             comp_func=temp_compensation,
             normalize=True,
             temp_col=temp_col,
             comp_coeff=comp_coeff,
         )
         df_clean = df_clean.drop(columns=[signal_col])
-        df_clean = df_clean.rename(columns={f'{signal_col}_comp': signal_col})
+        df_clean = df_clean.rename(columns={signal_col + '_comp': signal_col})
 
     # Save main CSV (raw column kept for visualisation in Notebook 00)
-    output_path = os.path.join(output_dir, f'{st}_preprocessed.csv')
+    output_path = os.path.join(output_dir, st + '_preprocessed.csv')
     df_clean.to_csv(output_path)
-    print(f"  Saved  \u2192 {output_path}")
-    print(f"  Shape  : {df_clean.shape}  |  "
-          f"{df_clean.index.min()} \u2192 {df_clean.index.max()}")
+    print("  Saved  \u2192 " + output_path)
+    print("  Shape  : %s  |  %s \u2192 %s"
+          % (str(df_clean.shape), df_clean.index.min(), df_clean.index.max()))
 
     # Save dropped rows companion CSV
-    dropped_path = os.path.join(output_dir, f'{st}_dropped.csv')
+    dropped_path = os.path.join(output_dir, st + '_dropped.csv')
     df_dropped.to_csv(dropped_path)
-    print(f"  Dropped \u2192 {dropped_path}  ({len(df_dropped)} rows)")
+    print("  Dropped \u2192 %s  (%d rows)" % (dropped_path, len(df_dropped)))
 
-    return df_clean.drop(columns=[f'{signal_col}_raw'], errors='ignore'), output_path
+    return df_clean.drop(columns=[signal_col + '_raw'], errors='ignore'), output_path
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -301,7 +303,7 @@ def apply_compensation(df, target_col, new_col_name, comp_func,
     df_comp = df.copy()
 
     if target_col not in df_comp.columns:
-        raise KeyError(f"Target column '{target_col}' not found in DataFrame.")
+        raise KeyError("Target column '%s' not found in DataFrame." % target_col)
 
     df_comp[new_col_name] = comp_func(df_comp, target_col, **kwargs)
 
@@ -422,7 +424,7 @@ def align_and_resample(df_sensor, df_proxy, resample_freq='1H',
     pd.DataFrame
         Merged, aligned DataFrame.
     """
-    print(f"Resampling sensor data to {resample_freq}...")
+    print("Resampling sensor data to %s..." % resample_freq)
     sensor_resampled = df_sensor.resample(resample_freq).mean()
     if interpolation == 'spline':
         sensor_resampled = sensor_resampled.interpolate(method='spline', order=3)
@@ -434,7 +436,7 @@ def align_and_resample(df_sensor, df_proxy, resample_freq='1H',
         sensor_resampled, proxy_resampled,
         left_index=True, right_index=True, how='inner',
     )
-    print(f"Final aligned dataset contains {len(df_merged)} rows.")
+    print("Final aligned dataset contains %d rows." % len(df_merged))
     return df_merged
 
 
@@ -468,7 +470,7 @@ def align_multiple_proxies(df_sensor, proxies_dict, resample_freq='h',
     pd.DataFrame
         Merged aligned DataFrame with a complete regular index.
     """
-    print(f"Resampling sensor data to {resample_freq}...")
+    print("Resampling sensor data to %s..." % resample_freq)
     sensor_resampled = df_sensor.resample(resample_freq).mean()
     full_index = pd.date_range(
         start=sensor_resampled.index.min(),
@@ -477,9 +479,10 @@ def align_multiple_proxies(df_sensor, proxies_dict, resample_freq='h',
     )
     sensor_resampled = sensor_resampled.reindex(full_index)
     sensor_resampled.index.name = 'datetime'
-    print(f"Complete index: {len(full_index)} time steps "
-          f"({sensor_resampled.index.min()} \u2192 {sensor_resampled.index.max()})")
-    print(f"Sensor NaN rows (gaps): {sensor_resampled.isna().any(axis=1).sum()}")
+    print("Complete index: %d time steps (%s \u2192 %s)"
+          % (len(full_index), sensor_resampled.index.min(), sensor_resampled.index.max()))
+    print("Sensor NaN rows (gaps): %d"
+          % sensor_resampled.isna().any(axis=1).sum())
     if interpolation:
         if interpolation == 'spline':
             sensor_resampled = sensor_resampled.interpolate(method='spline', order=3)
@@ -487,16 +490,16 @@ def align_multiple_proxies(df_sensor, proxies_dict, resample_freq='h',
             sensor_resampled = sensor_resampled.interpolate(method=interpolation)
     df_merged = sensor_resampled
     for name, df_proxy in proxies_dict.items():
-        print(f"Resampling proxy '{name}' to {resample_freq}...")
+        print("Resampling proxy '%s' to %s..." % (name, resample_freq))
         proxy_resampled = df_proxy.resample(resample_freq).mean()
         if add_prefix:
             proxy_resampled.columns = [
-                f"{name}_{col}" for col in proxy_resampled.columns
+                name + '_' + col for col in proxy_resampled.columns
             ]
-        print(f"Merging '{name}'...")
+        print("Merging '%s'..." % name)
         df_merged = pd.merge(
             df_merged, proxy_resampled,
             left_index=True, right_index=True, how='left',
         )
-    print(f"Final aligned dataset contains {len(df_merged)} rows.")
+    print("Final aligned dataset contains %d rows." % len(df_merged))
     return df_merged

@@ -18,11 +18,31 @@
 #
 # **Pipeline position**: Auxiliary notebook. Runs *before* Notebook 01.
 #
-# This notebook downloads hourly weather data from the Meteosystem website
+# This notebook downloads 30-minute weather data from the Meteosystem website
 # (www.meteosystem.com) for a specified Italian station, assembles the monthly
-# CSVs into a single DataFrame, standardises column names and the datetime index,
-# and saves the result to `data/raw/proxies/` in the exact format expected by
-# Notebook 01.
+# CSVs into a single DataFrame, parses the datetime index from the two source
+# columns (`Data` + `Ora`), and saves the result to `data/raw/proxies/` so that
+# Notebook 01 can load it with `pd.read_csv(PROXY_FILE, index_col=0, parse_dates=True)`.
+#
+# ## Source schema (Meteosystem Gubbio)
+#
+# | Raw column | Type | Notes |
+# |---|---|---|
+# | `Data` | date string `d/m/yyyy` | Combined with `Ora` to form the datetime index |
+# | `Ora` | time string `H:MM` | Combined with `Data` |
+# | `Temp` | float °C | Air temperature |
+# | `Min` | float °C | Minimum temperature in period |
+# | `Max` | float °C | Maximum temperature in period |
+# | `Umid` | int % | Relative humidity |
+# | `Dew pt` | float °C | Dew-point temperature |
+# | `Vento` | float m/s | Wind speed |
+# | `Dir` | string (e.g. `NE`) | Wind direction — categorical, **dropped** |
+# | `Raffica` | float m/s | Wind gust speed |
+# | `Dir Raff.` | string | Gust direction — categorical, **dropped** |
+# | `Press` | float hPa | Atmospheric pressure |
+# | `Pioggia` | float mm | Precipitation |
+# | `Int.Pio.` | float | Precipitation intensity |
+# | `Rad.Sol.` | int W/m² | Solar radiation |
 #
 # ## Output contract (required by Notebook 01)
 #
@@ -31,16 +51,14 @@
 # | **File location** | `data/raw/proxies/{OUTPUT_NAME}.csv` |
 # | **First column (index)** | `datetime` — ISO 8601, timezone-naive UTC |
 # | **Index name** | `datetime` |
-# | **Column names** | English, with units in parentheses — e.g. `temperature (degC)` |
-# | **Metadata columns** | Removed before saving |
-# | **Values** | Numeric only; non-numeric entries coerced to `NaN` |
+# | **Values** | Numeric only; categorical columns dropped |
 #
 # ## Steps
 # 1. **Configuration** — Set station URL, date range, and output name.
 # 2. **Download** — Fetch monthly CSVs from Meteosystem and concatenate.
-# 3. **Inspect raw columns** — Print the raw column list from the source.
-# 4. **Standardise** — Parse datetime index, rename columns, drop metadata.
-# 5. **Validate** — Check coverage, continuity, and missing-value rate.
+# 3. **Inspect raw columns** — Verify the raw column list matches the schema above.
+# 4. **Standardise** — Combine datetime columns, drop categoricals, coerce to numeric.
+# 5. **Validate** — Check coverage, sorted index, and missing-value rate.
 # 6. **Save** — Write to `data/raw/proxies/{OUTPUT_NAME}.csv`.
 
 # %%
@@ -64,11 +82,10 @@ from IPython.display import display
 # | `STATION_SLUG` | `str` | Subdirectory in the Meteosystem URL (e.g. `'gubbio'`). Change for a different station. |
 # | `START_YEAR` | `int` | First year to download (inclusive). |
 # | `END_YEAR` | `int` | Last year to download (inclusive). |
-# | `OUTPUT_NAME` | `str` | Base filename written to `data/raw/proxies/`. Notebook 01 reads this path via `PROXY_FILE`. |
-# | `COLUMN_RENAME` | `dict` | Maps raw Meteosystem column headers to standardised English names. Inspect Step 3 output and update this dict if the source schema changes. |
-# | `META_COLS` | `list` | Raw column names that carry metadata (station name, coordinates, etc.) and must be dropped before saving. |
-# | `TZ_SOURCE` | `str` or `None` | IANA timezone of the raw data (e.g. `'Europe/Rome'`). Set to `None` if already UTC or timezone-naive. The index is always saved timezone-naive (UTC). |
-# | `REQUEST_DELAY` | `float` | Seconds to wait between requests. Keep ≥ 1.0 to avoid overloading the server. |
+# | `OUTPUT_NAME` | `str` | Base filename written to `data/raw/proxies/`. Set `PROXY_FILE` in Notebook 01 to this path. |
+# | `COLUMNS_TO_DROP` | `list` | Columns to remove before saving. Used for categorical columns (`Dir`, `Dir Raff.`) that cannot be used as numeric proxy variables. Add any other unwanted columns here. |
+# | `TZ_SOURCE` | `str` or `None` | IANA timezone of the raw timestamps. The output index is always timezone-naive UTC. Set to `None` if the source is already UTC. |
+# | `REQUEST_DELAY` | `float` | Seconds to wait between requests. Keep ≥ 1.0. |
 
 # %%
 # === USER INPUT ===
@@ -77,40 +94,10 @@ START_YEAR   = 2020
 END_YEAR     = 2022
 OUTPUT_NAME  = 'meteosystem_gubbio'   # → saved as data/raw/proxies/meteosystem_gubbio.csv
 
-# Rename map: raw Meteosystem header → standardised name used by Notebook 01
-# Keys must match EXACTLY what the source CSV returns (check case and spacing).
-# Run Step 3 first to inspect the raw column names, then fill / correct these entries.
-COLUMN_RENAME = {
-    # --- datetime ---
-    'Data/Ora':                     'datetime',
+# Categorical columns to drop (not coercible to numeric, not useful as proxy variables)
+COLUMNS_TO_DROP = ['Dir', 'Dir Raff.']
 
-    # --- temperature ---
-    'Temp. Aria (°C)':              'temperature (degC)',
-    'Temp. Rugiada (°C)':           'dewpoint_temperature (degC)',
-    'Temp. Bulbo Umido (°C)':       'wetbulb_temperature (degC)',
-
-    # --- humidity ---
-    'Umidità Relativa (%)':         'relative_humidity (%)',
-
-    # --- radiation ---
-    'Radiazione Solare (W/m²)':     'surface_solar_radiation (W/m^2)',
-
-    # --- wind ---
-    'Velocità Vento (m/s)':         'wind_speed (m/s)',
-    'Direzione Vento (°)':          'wind_direction (deg)',
-
-    # --- precipitation ---
-    'Precipitazione (mm)':          'total_precipitation (mm)',
-
-    # --- pressure ---
-    'Pressione (hPa)':              'pressure (hPa)',
-}
-
-# Columns that carry metadata and must be dropped (use raw names, before renaming).
-# Inspect Step 3 output and fill in any metadata columns (e.g. ['Stazione', 'Lat', 'Lon']).
-META_COLS = []
-
-TZ_SOURCE     = 'Europe/Rome'   # Raw data timezone. Set to None if already UTC/naive.
+TZ_SOURCE     = 'Europe/Rome'   # Raw timestamps are local Italian time (CET/CEST)
 REQUEST_DELAY = 1.0             # seconds between HTTP requests
 # ==================
 
@@ -126,8 +113,9 @@ print(f'Output   : {OUTPUT_PATH}')
 # ## Step 2 · Download Monthly CSVs
 #
 # Iterates month by month, constructs the Meteosystem query URL, and accumulates
-# each monthly chunk. Failures are logged but do not abort the loop — a summary
-# of failed months is printed at the end.
+# each monthly chunk. The source uses comma as separator and encodes dates as
+# two separate columns (`Data`, `Ora`). Failures are logged but do not abort the
+# loop — a summary of failed months is printed at the end.
 
 # %%
 all_chunks    = []
@@ -155,7 +143,8 @@ for year in range(START_YEAR, END_YEAR + 1):
                 print('no data — skipped.')
                 continue
 
-            chunk = pd.read_csv(io.StringIO(text), sep=';')
+            # Source uses comma separator
+            chunk = pd.read_csv(io.StringIO(text), sep=',')
 
             if chunk.empty:
                 print('empty CSV — skipped.')
@@ -177,9 +166,10 @@ if failed_months:
 # %% [markdown]
 # ## Step 3 · Inspect Raw Columns
 #
-# Print the raw column headers returned by the source so you can update
-# `COLUMN_RENAME` and `META_COLS` in Step 1 if needed.
-# **Review this output before proceeding to Step 4.**
+# Prints the raw column headers. Expected schema:
+# `Data, Ora, Temp, Min, Max, Umid, Dew pt, Vento, Dir, Raffica, Dir Raff., Press, Pioggia, Int.Pio., Rad.Sol.`
+#
+# If the printed headers differ, update `COLUMNS_TO_DROP` in Step 1 accordingly.
 
 # %%
 assert all_chunks, (
@@ -198,48 +188,38 @@ for i, col in enumerate(df_raw.columns):
 display(df_raw.head(3))
 
 # %% [markdown]
-# ## Step 4 · Standardise — Datetime Index, Column Names, Metadata Removal
+# ## Step 4 · Standardise — Datetime Index, Drop Categoricals, Coerce to Numeric
 #
 # ### Parameter Tuning Guidance
 #
 # | Parameter | Where | Description |
 # |---|---|---|
-# | `COLUMN_RENAME` | Step 1 | Update if raw column names differ from the default keys. |
-# | `META_COLS` | Step 1 | Add any metadata column names found in the Step 3 output. |
-# | `TZ_SOURCE` | Step 1 | Set to the IANA timezone of the raw timestamps (e.g. `'Europe/Rome'`). The output index is always timezone-naive UTC. |
+# | `COLUMNS_TO_DROP` | Step 1 | Add any column names you want to exclude from the output. |
+# | `TZ_SOURCE` | Step 1 | IANA timezone string for the raw timestamps. Meteosystem Italy serves local time (CET in winter, CEST in summer). Output is always timezone-naive UTC. |
 #
-# **Do not perform unit conversions here.**  Notebook 01 operates on the raw
-# physical units as they arrive. Convert only if the source scale is non-standard
-# (e.g. if relative humidity is in % but your pipeline expects 0–1 fraction).
+# The `Data` and `Ora` columns are combined into a single `datetime` string
+# before parsing. Both columns are then dropped. All remaining columns are
+# coerced to numeric; non-numeric values become `NaN`.
 
 # %%
 df = df_raw.copy()
 
-# --- Drop metadata columns ---
-cols_to_drop = [c for c in META_COLS if c in df.columns]
-if cols_to_drop:
-    df = df.drop(columns=cols_to_drop)
-    print(f'Dropped metadata columns: {cols_to_drop}')
-
-# --- Rename known columns ---
-rename_applicable = {k: v for k, v in COLUMN_RENAME.items() if k in df.columns}
-df = df.rename(columns=rename_applicable)
-
-unmapped = [c for c in df.columns if c not in rename_applicable.values() and c != 'datetime']
-if unmapped:
-    print(f'\n⚠ Unmapped columns (kept as-is, review COLUMN_RENAME): {unmapped}')
-
-# --- Parse and set datetime index ---
-assert 'datetime' in df.columns, (
-    "No 'datetime' column found after renaming. "
-    "Ensure COLUMN_RENAME maps the raw date column to 'datetime'."
+# --- Combine Data + Ora into a single datetime column ---
+assert 'Data' in df.columns and 'Ora' in df.columns, (
+    "Expected columns 'Data' and 'Ora' not found. "
+    "Check Step 3 output for the actual date/time column names."
 )
 
-df['datetime'] = pd.to_datetime(df['datetime'], dayfirst=True, errors='coerce')
+df['datetime'] = pd.to_datetime(
+    df['Data'].astype(str) + ' ' + df['Ora'].astype(str),
+    dayfirst=True,
+    errors='coerce',
+)
+df = df.drop(columns=['Data', 'Ora'])
 
 n_unparsed = df['datetime'].isnull().sum()
 if n_unparsed:
-    print(f'\n⚠ {n_unparsed} rows had unparseable datetime values — dropped.')
+    print(f'⚠ {n_unparsed} rows had unparseable datetime values — dropped.')
     df = df.dropna(subset=['datetime'])
 
 # --- Timezone conversion → UTC naive ---
@@ -252,17 +232,26 @@ if TZ_SOURCE is not None:
     )
     print(f'Timezone: {TZ_SOURCE} → UTC (timezone-naive)')
 else:
-    if hasattr(df['datetime'].dtype, 'tz') and df['datetime'].dt.tz is not None:
-        df['datetime'] = df['datetime'].dt.tz_localize(None)
-    print('Timezone: assumed UTC — no conversion applied.')
+    print('Timezone: no conversion applied (assumed UTC).')
 
+# --- Set datetime as index ---
 df = df.set_index('datetime')
 df.index.name = 'datetime'
 df = df.sort_index()
 
+# --- Drop categorical / unwanted columns ---
+cols_to_drop = [c for c in COLUMNS_TO_DROP if c in df.columns]
+if cols_to_drop:
+    df = df.drop(columns=cols_to_drop)
+    print(f'Dropped columns    : {cols_to_drop}')
+
 # --- Coerce all remaining columns to numeric ---
 for col in df.columns:
     df[col] = pd.to_numeric(df[col], errors='coerce')
+
+non_numeric_remaining = df.select_dtypes(exclude='number').columns.tolist()
+if non_numeric_remaining:
+    print(f'⚠ Non-numeric columns still present — add to COLUMNS_TO_DROP: {non_numeric_remaining}')
 
 print(f'\nStandardised shape  : {df.shape}')
 print(f'Index range         : {df.index.min()}  →  {df.index.max()}')
@@ -270,7 +259,7 @@ print(f'Index dtype         : {df.index.dtype}')
 print(f'\nFinal columns ({len(df.columns)}):')
 for col in df.columns:
     miss = df[col].isnull().mean() * 100
-    print(f'  {col:<45}  {miss:5.1f}% missing')
+    print(f'  {col:<20}  {miss:5.1f}% missing')
 
 display(df.head(3))
 
@@ -281,6 +270,7 @@ display(df.head(3))
 # - Index is a sorted, timezone-naive `DatetimeIndex`
 # - No column is entirely `NaN`
 # - Dataset covers the requested date range
+# - No non-numeric columns remain
 
 # %%
 validation_ok = True
@@ -299,6 +289,11 @@ all_nan = [c for c in df.columns if df[c].isnull().all()]
 if all_nan:
     print(f'⚠ Entirely-NaN columns dropped: {all_nan}')
     df = df.drop(columns=all_nan)
+
+non_num = df.select_dtypes(exclude='number').columns.tolist()
+if non_num:
+    print(f'⚠ Non-numeric columns still present (add to COLUMNS_TO_DROP): {non_num}')
+    validation_ok = False
 
 expected_start = pd.Timestamp(f'{START_YEAR}-01-01')
 expected_end   = pd.Timestamp(f'{END_YEAR}-12-31')
@@ -336,14 +331,16 @@ if numeric_cols:
 # %% [markdown]
 # ## Step 6 · Save
 #
-# Saves the standardised proxy dataset to `data/raw/proxies/{OUTPUT_NAME}.csv`.
+# Saves the dataset to `data/raw/proxies/{OUTPUT_NAME}.csv`.
 # The datetime index is written as the first column so Notebook 01 can load it
 # with `pd.read_csv(PROXY_FILE, index_col=0, parse_dates=True)`.
 #
-# In Notebook 01, set:
+# **In Notebook 01 Step 2, set:**
 # ```python
 # PROXY_FILE = 'data/raw/proxies/{OUTPUT_NAME}.csv'
 # ```
+# Then in Step 3, choose columns from the list printed in Step 4 above
+# (e.g. `'Temp'`, `'Umid'`, `'Dew pt'`, `'Rad.Sol.'`, etc.).
 
 # %%
 if validation_ok:
@@ -353,6 +350,9 @@ if validation_ok:
     print(f'  Index range    : {df.index.min()}  →  {df.index.max()}')
     print(f'\nIn Notebook 01, set:')
     print(f"  PROXY_FILE = '{OUTPUT_PATH}'")
+    print(f'\nAvailable columns for PROXY_COLS in Notebook 01 Step 3:')
+    for col in df.columns:
+        print(f"  '{col}'")
 else:
     print('Save skipped — resolve validation warnings above before saving.')
     print('To force-save despite warnings, replace `if validation_ok:` with `if True:`.')

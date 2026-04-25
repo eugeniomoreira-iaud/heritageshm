@@ -121,43 +121,69 @@ print(f'Output   : {OUTPUT_PATH}')
 all_chunks    = []
 failed_months = []
 
+from datetime import date, timedelta
+from tqdm.auto import tqdm
+
+yesterday = date.today() - timedelta(days=1)
+
+# Collect all valid year/month pairs that are not entirely in the future
+months_to_download = []
 for year in range(START_YEAR, END_YEAR + 1):
-    yy = str(year)[-2:]
     for month in range(1, 13):
-        _, last_day = calendar.monthrange(year, month)
-        mm = f'{month:02d}'
+        if date(year, month, 1) > yesterday:
+            break
+        months_to_download.append((year, month))
 
-        params = {
-            'gg2': '01',               'mm2': mm, 'aa2': yy,
-            'gg':  f'{last_day:02d}',  'mm':  mm, 'aa':  yy,
-        }
+pbar = tqdm(months_to_download, desc="Downloading monthly data")
+for year, month in pbar:
+    yy = str(year)[-2:]
+    _, last_day = calendar.monthrange(year, month)
+    
+    # Cap the end of the month to yesterday
+    month_end = date(year, month, last_day)
+    if month_end > yesterday:
+        last_day = yesterday.day
 
-        print(f'  Downloading {mm}/{year} … ', end='', flush=True)
+    mm = f'{month:02d}'
 
-        try:
-            response = requests.get(BASE_URL, params=params, timeout=30)
-            response.raise_for_status()
+    params = {
+        'gg2': '01',               'mm2': mm, 'aa2': yy,
+        'gg':  f'{last_day:02d}',  'mm':  mm, 'aa':  yy,
+    }
 
-            text = response.text.strip()
-            if not text:
-                print('no data — skipped.')
-                continue
+    pbar.set_postfix_str(f"Fetching {mm}/{year}")
 
-            # Source uses comma separator
-            chunk = pd.read_csv(io.StringIO(text), sep=',')
+    try:
+        response = requests.get(BASE_URL, params=params, timeout=30)
+        response.raise_for_status()
 
-            if chunk.empty:
-                print('empty CSV — skipped.')
-                continue
+        text = response.text.strip()
+        if not text:
+            continue
 
-            all_chunks.append(chunk)
-            print(f'OK  ({len(chunk)} rows)')
+        # Strip out PHP warnings that sometimes appear at the top of the response
+        lines = text.split('\n')
+        start_idx = 0
+        for i, line in enumerate(lines):
+            # The actual CSV header starts with "Data" and the separator is ";"
+            if line.strip().startswith('Data;'):
+                start_idx = i
+                break
+                
+        clean_text = '\n'.join(lines[start_idx:])
 
-        except Exception as exc:
-            print(f'FAILED: {exc}')
-            failed_months.append(f'{mm}/{year}')
+        # Source uses semicolon separator
+        chunk = pd.read_csv(io.StringIO(clean_text), sep=';')
 
-        time.sleep(REQUEST_DELAY)
+        if chunk.empty:
+            continue
+
+        all_chunks.append(chunk)
+
+    except Exception as exc:
+        failed_months.append(f'{mm}/{year}')
+
+    time.sleep(REQUEST_DELAY)
 
 print(f'\nDownload complete.  Chunks collected: {len(all_chunks)}')
 if failed_months:
@@ -226,10 +252,12 @@ if n_unparsed:
 if TZ_SOURCE is not None:
     df['datetime'] = (
         df['datetime']
-        .dt.tz_localize(TZ_SOURCE, ambiguous='infer', nonexistent='shift_forward')
+        .dt.tz_localize(TZ_SOURCE, ambiguous='NaT', nonexistent='shift_forward')
         .dt.tz_convert('UTC')
         .dt.tz_localize(None)   # strip tzinfo → timezone-naive UTC
     )
+    # Drop any rows that became NaT due to ambiguous DST transitions
+    df = df.dropna(subset=['datetime'])
     print(f'Timezone: {TZ_SOURCE} → UTC (timezone-naive)')
 else:
     print('Timezone: no conversion applied (assumed UTC).')

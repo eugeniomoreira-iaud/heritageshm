@@ -1,21 +1,26 @@
 name: neuralprophet_env
 channels:
+  - conda-forge
   - defaults
-  - https://repo.anaconda.com/pkgs/main
-  - https://repo.anaconda.com/pkgs/r
-  - https://repo.anaconda.com/pkgs/msys2
 dependencies:
-  - python
+  - python=3.11
+  - pip
   - ipykernel
-  - tqdm
-  - statsmodels
-  - requests
-  - matplotlib
-  - numpy
-  - scipy
-  - seaborn
-  - jinja2
   - jupyter
-  - jupyterlab-github
+  - jupyterlab
   - jupyterlab-git
-prefix: C:\ProgramData\anaconda3\envs\neuralprophet_env
+  - jupytext
+  - tqdm
+  - numpy
+  - pandas
+  - scipy
+  - statsmodels
+  - matplotlib
+  - seaborn
+  - scikit-learn
+  - xgboost
+  - requests
+  - jinja2
+  - watchdog
+  - pip:
+    - neuralprophet

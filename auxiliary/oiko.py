@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.16.0
 #   kernelspec:
 #     display_name: neuralprophet_env
 #     language: python
@@ -19,9 +19,9 @@
 # Downloads hourly weather data from the Oikolab ERA5 API for a given location and date range,
 # cleans the response, and saves the result in the format expected by **Notebook 01**.
 #
-# The Oikolab API enforces a 500-unit limit per request (1 unit = 1 parameter x 1 year).
-# With 63 parameters the safe window is 7 days per request, so this notebook
-# splits the full date range into annual chunks and concatenates the results.
+# The Oikolab API enforces a 500-unit limit per request.
+# One year of 63 parameters costs ~752 units, so the safe window is 6 months
+# (~376 units). The download is split into 6-month chunks and concatenated.
 #
 # ---
 #
@@ -40,7 +40,7 @@
 #
 # ## Steps
 # 1. **Parameters** - Location, date range, API key, output path.
-# 2. **Download** - Fetch one year at a time, with progress reporting.
+# 2. **Download** - Fetch one 6-month window at a time, with progress reporting.
 # 3. **Concatenate & clean** - Merge chunks, promote datetime index, drop metadata columns.
 # 4. **Save** - Write CSV with `index=True`.
 
@@ -53,6 +53,7 @@
 # | `START`, `END` | Inclusive date range (`YYYY-MM-DD`). Should fully bracket the sensor window |
 # | `API_KEY` | Oikolab API key |
 # | `OUTPUT_PATH` | Destination CSV - must match `PROXY_FILE` in Notebook 01 |
+# | `CHUNK_MONTHS` | Request window size in months. Reduce if you hit 500-unit errors |
 
 # %%
 import requests
@@ -60,19 +61,19 @@ import pandas as pd
 import io
 import os
 import time
-from datetime import date, timedelta
+from datetime import date
 from dateutil.relativedelta import relativedelta
 
 # === USER INPUT ===
-LAT         = 43.35343
-LON         = 12.582047
-START       = '2018-01-01'
-END         = '2026-04-25'
-API_KEY     = '8426a7e187b9481ab575814f707c8f8d'
-OUTPUT_PATH = '../data/raw/proxies/oikolab_weather.csv'
+LAT          = 43.35343
+LON          = 12.582047
+START        = '2018-01-01'
+END          = '2026-04-25'
+API_KEY      = '8426a7e187b9481ab575814f707c8f8d'
+OUTPUT_PATH  = '../data/raw/proxies/oikolab_weather.csv'
+CHUNK_MONTHS = 6   # 6 months x 63 params ~ 376 units (limit is 500)
 # ==================
 
-# Oikolab response metadata - always present, never needed downstream
 META_COLS = [
     'coordinates (lat,lon)',
     'model (name)',
@@ -83,9 +84,8 @@ META_COLS = [
 # %% [markdown]
 # ## Step 2 - Download
 #
-# The API limit is 500 units per request (1 unit ~ 1 parameter x 1 year).
-# With 63 parameters, each annual chunk uses ~63 units, well within the limit.
-# Chunks are fetched year by year; a short sleep avoids rate-limiting.
+# Chunks are built by advancing a cursor in steps of `CHUNK_MONTHS`.
+# A 1-second pause between requests avoids rate-limiting.
 
 # %%
 PARAMS = [
@@ -116,22 +116,22 @@ PARAMS = [
     'surface_net_thermal_radiation', 'forecast_albedo',
 ]
 
-def build_annual_windows(start_str, end_str):
-    """Yield (chunk_start, chunk_end) pairs, one per calendar year."""
+def build_chunk_windows(start_str, end_str, months):
+    """Yield (chunk_start, chunk_end) pairs of `months` months each."""
     start = date.fromisoformat(start_str)
     end   = date.fromisoformat(end_str)
     cursor = start
     while cursor <= end:
-        chunk_end = min(date(cursor.year, 12, 31), end)
+        chunk_end = min(cursor + relativedelta(months=months) - relativedelta(days=1), end)
         yield cursor.isoformat(), chunk_end.isoformat()
-        cursor = date(cursor.year + 1, 1, 1)
+        cursor = cursor + relativedelta(months=months)
+
+windows = list(build_chunk_windows(START, END, CHUNK_MONTHS))
+print(f'Fetching {len(windows)} chunks of {CHUNK_MONTHS} months each ...')
 
 chunks = []
-windows = list(build_annual_windows(START, END))
-print(f'Fetching {len(windows)} annual chunks ...')
-
 for i, (chunk_start, chunk_end) in enumerate(windows):
-    print(f'  [{i+1}/{len(windows)}] {chunk_start} -> {chunk_end} ...', end=' ')
+    print(f'  [{i+1}/{len(windows)}] {chunk_start} -> {chunk_end} ...', end=' ', flush=True)
     r = requests.get(
         'https://api.oikolab.com/weather',
         params={
@@ -153,9 +153,9 @@ for i, (chunk_start, chunk_end) in enumerate(windows):
     chunk_df = pd.read_csv(io.StringIO(r.text))
     chunks.append(chunk_df)
     print(f'OK ({len(chunk_df)} rows)')
-    time.sleep(1)  # polite pause between requests
+    time.sleep(1)
 
-print('All chunks downloaded.')
+print(f'All {len(windows)} chunks downloaded.')
 
 # %% [markdown]
 # ## Step 3 - Concatenate and Clean
@@ -166,8 +166,6 @@ print('All chunks downloaded.')
 
 # %%
 df = pd.concat(chunks, ignore_index=True)
-
-# Deduplicate boundary rows that may appear in two adjacent chunks
 df = df.drop_duplicates(subset='datetime (UTC)')
 
 df['datetime (UTC)'] = pd.to_datetime(df['datetime (UTC)'])

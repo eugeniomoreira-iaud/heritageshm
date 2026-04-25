@@ -11,6 +11,11 @@ class JupytextSyncHandler(FileSystemEventHandler):
         
         filepath = event.src_path
         
+        # Ignore the 'old' directory
+        path_parts = os.path.normpath(filepath).split(os.sep)
+        if 'old' in path_parts:
+            return
+        
         # Only trigger on .ipynb or .py files
         if filepath.endswith('.ipynb') or filepath.endswith('.py'):
             # Ignore hidden files, checkpoints, and jupytext temporary files
@@ -31,13 +36,41 @@ class JupytextSyncHandler(FileSystemEventHandler):
                 except FileNotFoundError:
                     print("Error: 'jupytext' command not found. Make sure you are in the neuralprophet_env conda environment.")
 
+def initialize_pairs():
+    print("Initializing missing .py pairs...")
+    count = 0
+    # Walk through all directories
+    for root, dirs, files in os.walk('.'):
+        # Skip the 'old' directory and hidden directories
+        dirs[:] = [d for d in dirs if d != 'old' and not d.startswith('.')]
+        
+        for file in files:
+            if file.endswith('.ipynb') and "checkpoint" not in file:
+                ipynb_path = os.path.join(root, file)
+                py_path = ipynb_path.rsplit('.ipynb', 1)[0] + '.py'
+                
+                if not os.path.exists(py_path):
+                    print(f"Creating missing .py pair for {ipynb_path}")
+                    try:
+                        subprocess.run(["jupytext", "--set-formats", "ipynb,py:percent", ipynb_path], check=True)
+                        count += 1
+                    except subprocess.CalledProcessError as e:
+                        print(f"Error pairing {ipynb_path}: {e}")
+                    except FileNotFoundError:
+                        print("Error: 'jupytext' command not found.")
+                        return
+    print(f"Initialized {count} missing pairs.")
+
 if __name__ == "__main__":
+    # First, initialize any missing .py pairs
+    initialize_pairs()
+
     observer = Observer()
-    # Watch the current directory
-    observer.schedule(JupytextSyncHandler(), path='.', recursive=False)
+    # Watch the current directory recursively
+    observer.schedule(JupytextSyncHandler(), path='.', recursive=True)
     observer.start()
     
-    print("Watching for file saves... (Press Ctrl+C to stop)")
+    print("\nWatching for file saves recursively... (Press Ctrl+C to stop)")
     try:
         while True:
             time.sleep(1)

@@ -20,8 +20,7 @@
 # cleans the response, and saves the result in the format expected by **Notebook 01**.
 #
 # The Oikolab API enforces a 500-unit limit per request.
-# One year of 63 parameters costs ~752 units, so the safe window is 6 months
-# (~376 units). The download is split into 6-month chunks and concatenated.
+# With 10 parameters the limit is ~120 units per 6-month chunk, well within bounds.
 #
 # ---
 #
@@ -33,8 +32,25 @@
 # | **Index** | `datetime` column (UTC timestamps), first CSV column |
 # | **Read by NB01** | `pd.read_csv(..., index_col=0, parse_dates=True)` |
 # | **Metadata dropped** | `coordinates (lat,lon)`, `model (name)`, `model elevation (surface)`, `utc_offset (hrs)` |
-# | **Data columns** | All ERA5 variables returned by the API, unchanged |
+# | **Data columns** | 10 SHM-relevant ERA5 weather variables |
 # | **Timezone** | UTC - align to local time in Notebook 01 if the sensor uses local time |
+#
+# ---
+#
+# ## Parameters downloaded
+#
+# | Variable | Role in SHM |
+# |---|---|
+# | `temperature` | Primary driver of thermal expansion/contraction |
+# | `relative_humidity` | Governs masonry moisture content and hygric deformation |
+# | `dewpoint_temperature` | Condensation threshold on surfaces |
+# | `surface_solar_radiation` | Thermal forcing on sun-exposed facades |
+# | `surface_thermal_radiation` | Longwave radiative cooling at night |
+# | `total_precipitation` | Direct moisture input to the wall |
+# | `wind_speed` | Wind-driven rain and evaporative cooling |
+# | `wind_direction` | Driving rain orientation |
+# | `skin_temperature` | Closest ERA5 proxy to surface-mounted sensor readings |
+# | `snowfall` | Freeze-thaw loading; relevant for Apennine winters |
 #
 # ---
 #
@@ -71,7 +87,7 @@ START        = '2018-01-01'
 END          = '2026-04-25'
 API_KEY      = '8426a7e187b9481ab575814f707c8f8d'
 OUTPUT_PATH  = '../data/raw/proxies/oikolab_weather.csv'
-CHUNK_MONTHS = 6   # 6 months x 63 params ~ 376 units (limit is 500)
+CHUNK_MONTHS = 6   # 6 months x 10 params ~ 60 units (limit is 500)
 # ==================
 
 META_COLS = [
@@ -84,36 +100,21 @@ META_COLS = [
 # %% [markdown]
 # ## Step 2 - Download
 #
-# Chunks are built by advancing a cursor in steps of `CHUNK_MONTHS`.
+# 10 SHM-relevant regressors. With 6-month chunks each request uses ~60 units.
 # A 1-second pause between requests avoids rate-limiting.
 
 # %%
 PARAMS = [
-    'temperature', 'dewpoint_temperature', 'relative_humidity',
-    'wetbulb_temperature', 'humidex_index', 'heating_degreeday',
-    'cooling_degreeday', 'sea_surface_temperature', 'skin_temperature',
-    'urban_temperature', 'wind_speed', 'wind_direction',
-    '10m_wind_gust', '10m_u_component_of_wind', '10m_v_component_of_wind',
-    '100m_wind_speed', '100m_wind_direction', '100m_u_component_of_wind',
-    '100m_v_component_of_wind', 'total_cloud_cover', 'total_precipitation',
-    'surface_pressure', 'mean_sea_level_pressure', 'surface_solar_radiation',
-    'surface_thermal_radiation', 'direct_normal_solar_radiation',
-    'surface_direct_solar_radiation', 'surface_diffuse_solar_radiation',
-    'snowfall', 'snow_depth', 'soil_temperature_level_1',
-    'soil_temperature_level_2', 'soil_temperature_level_3',
-    'soil_temperature_level_4', 'volumetric_soil_water_layer_1',
-    'volumetric_soil_water_layer_2', 'volumetric_soil_water_layer_3',
-    'volumetric_soil_water_layer_4', 'boundary_layer_height',
-    'cloud_base_height', 'convective_inhibition',
-    'convective_available_potential_energy', 'forecast_surface_roughness',
-    'friction_velocity', 'high_vegetation_cover', 'low_vegetation_cover',
-    'leaf_area_index_high_vegetation', 'leaf_area_index_low_vegetation',
-    'high_cloud_cover', 'medium_cloud_cover', 'low_cloud_cover',
-    'evaporation', 'potential_evaporation', 'skin_reservoir_content',
-    'surface_latent_heat_flux', 'surface_runoff', 'sub_surface_runoff',
-    'total_column_rain_water', 'total_column_water_vapour',
-    'downward_uv_radiation_at_the_surface', 'surface_net_solar_radiation',
-    'surface_net_thermal_radiation', 'forecast_albedo',
+    'temperature',
+    'relative_humidity',
+    'dewpoint_temperature',
+    'surface_solar_radiation',
+    'surface_thermal_radiation',
+    'total_precipitation',
+    'wind_speed',
+    'wind_direction',
+    'skin_temperature',
+    'snowfall',
 ]
 
 def build_chunk_windows(start_str, end_str, months):
@@ -127,7 +128,7 @@ def build_chunk_windows(start_str, end_str, months):
         cursor = cursor + relativedelta(months=months)
 
 windows = list(build_chunk_windows(START, END, CHUNK_MONTHS))
-print(f'Fetching {len(windows)} chunks of {CHUNK_MONTHS} months each ...')
+print(f'Fetching {len(windows)} chunks of {CHUNK_MONTHS} months ({len(PARAMS)} params each) ...')
 
 chunks = []
 for i, (chunk_start, chunk_end) in enumerate(windows):

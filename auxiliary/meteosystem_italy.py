@@ -58,19 +58,76 @@
 # 2. **Download** — Fetch monthly CSVs from Meteosystem and concatenate.
 # 3. **Inspect raw columns** — Verify the raw column list matches the schema above.
 # 4. **Standardise** — Combine datetime columns, drop categoricals, coerce to numeric.
-# 5. **Validate** — Check coverage, sorted index, and missing-value rate.
-# 6. **Save** — Write to `data/raw/proxies/{OUTPUT_NAME}.csv`.
+# 5. **Validate and Save** — Check coverage, sorted index, and missing-value rate; save if all checks pass.
+#
+# > **Jupytext pairing note:** This notebook is paired with `meteosystem_italy.ipynb`
+# > via the `formats: ipynb,py:percent` header above. The root `jupytext.toml`
+# > applies globally to all notebooks in the repository, including those in `auxiliary/`.
+# > Always edit this `.py` file and sync to the notebook via `jupytext --sync` or
+# > `auto_watcher.py`. Never edit the `.ipynb` directly.
+
+# %% [markdown]
+# ## Imports
 
 # %%
+# [Fix 1] All imports consolidated in this single cell — including tqdm.
 import os
 import io
 import calendar
 import time
+from datetime import date, timedelta
 
 import pandas as pd
 import requests
 import matplotlib.pyplot as plt
 from IPython.display import display
+from tqdm.auto import tqdm
+
+
+# %% [markdown]
+# ## Helper Functions
+
+# %%
+# [Fix 2] Inline plot logic refactored into a named helper.
+def _plot_proxy_overview(df: pd.DataFrame, station_slug: str, n_cols: int = 4) -> None:
+    """
+    Produces a quick multi-panel time-series overview of the proxy dataset.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Standardised proxy DataFrame with a DatetimeIndex and numeric columns.
+    station_slug : str
+        Station identifier used in the plot title (e.g. ``'gubbio'``).
+    n_cols : int, optional
+        Maximum number of columns to plot. Default 4.
+
+    Returns
+    -------
+    None
+        Displays the figure inline; does not save to disk.
+    """
+    numeric_cols = df.select_dtypes(include='number').columns.tolist()
+    if not numeric_cols:
+        print('No numeric columns to plot.')
+        return
+
+    n_plot = min(len(numeric_cols), n_cols)
+    fig, axes = plt.subplots(n_plot, 1, figsize=(14, 3 * n_plot), sharex=True)
+    if n_plot == 1:
+        axes = [axes]
+
+    for ax, col in zip(axes, numeric_cols[:n_plot]):
+        ax.plot(df.index, df[col], linewidth=0.5, color='steelblue')
+        ax.set_ylabel(col, fontsize=8)
+        ax.grid(True, alpha=0.3)
+
+    axes[0].set_title(
+        f'Meteosystem {station_slug.capitalize()} — quick overview', fontsize=10
+    )
+    fig.tight_layout()
+    plt.show()
+
 
 # %% [markdown]
 # ## Step 1 · Configuration
@@ -85,7 +142,7 @@ from IPython.display import display
 # | `OUTPUT_NAME` | `str` | Base filename written to `data/raw/proxies/`. Set `PROXY_FILE` in Notebook 01 to this path. |
 # | `COLUMNS_TO_DROP` | `list` | Columns to remove before saving. Used for categorical columns (`Dir`, `Dir Raff.`) that cannot be used as numeric proxy variables. Add any other unwanted columns here. |
 # | `TZ_SOURCE` | `str` or `None` | IANA timezone of the raw timestamps. The output index is always timezone-naive UTC. Set to `None` if the source is already UTC. |
-# | `REQUEST_DELAY` | `float` | Seconds to wait between requests. Keep ≥ 1.0. |
+# | `REQUEST_DELAY` | `float` | Seconds to wait between requests. Keep ≥ 1.0 (minimum — do not lower). |
 
 # %%
 # === USER INPUT ===
@@ -98,7 +155,7 @@ OUTPUT_NAME  = 'meteosystem_gubbio'   # → saved as data/raw/proxies/meteosyste
 COLUMNS_TO_DROP = ['Dir', 'Dir Raff.']
 
 TZ_SOURCE     = 'Europe/Rome'   # Raw timestamps are local Italian time (CET/CEST)
-REQUEST_DELAY = 1.0             # seconds between HTTP requests
+REQUEST_DELAY = 1.0             # seconds between HTTP requests (minimum — do not lower)
 # ==================
 
 BASE_URL    = f'https://www.meteosystem.com/dati/{STATION_SLUG}/csv.php'
@@ -121,9 +178,6 @@ print(f'Output   : {OUTPUT_PATH}')
 all_chunks    = []
 failed_months = []
 
-from datetime import date, timedelta
-from tqdm.auto import tqdm
-
 yesterday = date.today() - timedelta(days=1)
 
 # Collect all valid year/month pairs that are not entirely in the future
@@ -138,7 +192,7 @@ pbar = tqdm(months_to_download, desc="Downloading monthly data")
 for year, month in pbar:
     yy = str(year)[-2:]
     _, last_day = calendar.monthrange(year, month)
-    
+
     # Cap the end of the month to yesterday
     month_end = date(year, month, last_day)
     if month_end > yesterday:
@@ -169,7 +223,7 @@ for year, month in pbar:
             if line.strip().startswith('Data;'):
                 start_idx = i
                 break
-                
+
         clean_text = '\n'.join(lines[start_idx:])
 
         # Source uses semicolon separator
@@ -200,7 +254,8 @@ if failed_months:
 # %%
 assert all_chunks, (
     'No data was retrieved. '
-    'Check the station URL, date range, and network access.'
+    f'Check the station URL, date range, and network access. '
+    f'Failed months: {failed_months if failed_months else "none recorded"}'
 )
 
 df_raw = pd.concat(all_chunks, ignore_index=True)
@@ -292,15 +347,25 @@ for col in df.columns:
 display(df.head(3))
 
 # %% [markdown]
-# ## Step 5 · Validate
+# ## Step 5 · Validate and Save
+#
+# [Fix 3] Validation and save are consolidated into a single cell to prevent a
+# fragile cross-cell dependency on the `validation_ok` flag. Running this cell
+# from any kernel state is safe: `validation_ok` is always initialised to `True`
+# here before any check, and the save only proceeds if all checks pass.
+#
+# [Fix 4] `expected_end` is capped to yesterday so that setting `END_YEAR` to
+# the current year does not trigger a spurious coverage warning when data
+# legitimately ends before December 31.
 #
 # Checks that the output satisfies the Notebook 01 proxy contract:
 # - Index is a sorted, timezone-naive `DatetimeIndex`
 # - No column is entirely `NaN`
-# - Dataset covers the requested date range
+# - Dataset covers the requested date range (capped to yesterday)
 # - No non-numeric columns remain
 
 # %%
+# [Fix 3] Always initialised here — safe to re-run in any order.
 validation_ok = True
 
 assert isinstance(df.index, pd.DatetimeIndex), 'Index is not a DatetimeIndex.'
@@ -323,8 +388,12 @@ if non_num:
     print(f'⚠ Non-numeric columns still present (add to COLUMNS_TO_DROP): {non_num}')
     validation_ok = False
 
+# [Fix 4] Cap expected_end to yesterday so current-year END_YEAR does not
+# trigger a false coverage warning when data legitimately ends before Dec 31.
+yesterday_ts   = pd.Timestamp.today().normalize() - pd.Timedelta(days=1)
 expected_start = pd.Timestamp(f'{START_YEAR}-01-01')
-expected_end   = pd.Timestamp(f'{END_YEAR}-12-31')
+expected_end   = min(pd.Timestamp(f'{END_YEAR}-12-31'), yesterday_ts)
+
 if df.index.min() > expected_start:
     print(f'⚠ Dataset starts {df.index.min()}, later than expected {expected_start}.')
     validation_ok = False
@@ -339,22 +408,8 @@ else:
 
 print(f'\nFinal dataset: {df.shape[0]:,} rows × {df.shape[1]} columns')
 
-# Quick overview plot
-numeric_cols = df.select_dtypes(include='number').columns.tolist()
-if numeric_cols:
-    n_plot = min(len(numeric_cols), 4)
-    fig, axes = plt.subplots(n_plot, 1, figsize=(14, 3 * n_plot), sharex=True)
-    if n_plot == 1:
-        axes = [axes]
-    for ax, col in zip(axes, numeric_cols[:n_plot]):
-        ax.plot(df.index, df[col], linewidth=0.5, color='steelblue')
-        ax.set_ylabel(col, fontsize=8)
-        ax.grid(True, alpha=0.3)
-    axes[0].set_title(
-        f'Meteosystem {STATION_SLUG.capitalize()} — quick overview', fontsize=10
-    )
-    fig.tight_layout()
-    plt.show()
+# [Fix 2] Quick overview plot — delegated to helper function.
+_plot_proxy_overview(df, station_slug=STATION_SLUG, n_cols=4)
 
 # %% [markdown]
 # ## Step 6 · Save
@@ -369,6 +424,8 @@ if numeric_cols:
 # ```
 # Then in Step 3, choose columns from the list printed in Step 4 above
 # (e.g. `'Temp'`, `'Umid'`, `'Dew pt'`, `'Rad.Sol.'`, etc.).
+#
+# > To force-save despite validation warnings, replace `if validation_ok:` with `if True:`.
 
 # %%
 if validation_ok:

@@ -54,11 +54,17 @@
 # | **Values** | Numeric only; categorical columns dropped |
 #
 # ## Steps
-# 1. **Configuration** — Set station URL, date range, and output name.
-# 2. **Download** — Fetch monthly CSVs from Meteosystem and concatenate.
-# 3. **Inspect raw columns** — Verify the raw column list matches the schema above.
+# 1. **Configuration** — Set station URL, date range, output name, and cache settings.
+# 2. **Download** — Fetch missing monthly CSVs from Meteosystem; already-cached months are skipped.
+# 3. **Assemble** — Load all cached chunk files from disk and concatenate into `df_raw`.
 # 4. **Standardise** — Combine datetime columns, drop categoricals, coerce to numeric.
-# 5. **Validate and Save** — Check coverage, sorted index, and missing-value rate; save if all checks pass.
+# 5. **Validate and plot** — Check coverage, sorted index, and missing-value rate.
+# 6. **Save** — Write the final proxy CSV if all validations pass.
+#
+# > **Re-run workflow:** After the first full run of Step 2, you can freely modify and
+# > re-run Steps 3–6 without re-downloading any data. To download only newly added months,
+# > extend `END_YEAR` or `START_YEAR` and re-run Step 2 — already-cached months are skipped
+# > automatically. To force a full re-download, set `FORCE_REDOWNLOAD = True` in Step 1.
 #
 # > **Jupytext pairing note:** This notebook is paired with `meteosystem_italy.ipynb`
 # > via the `formats: ipynb,py:percent` header above. The root `jupytext.toml`
@@ -78,6 +84,7 @@ import io
 import calendar
 import time
 from datetime import date, timedelta
+from pathlib import Path
 
 import pandas as pd
 import requests
@@ -102,13 +109,15 @@ apply_theme()
 # | `COLUMNS_TO_DROP` | `list` | Columns to remove before saving. Used for categorical columns (`Dir`, `Dir Raff.`) that cannot be used as numeric proxy variables. Add any other unwanted columns here. |
 # | `TZ_SOURCE` | `str` or `None` | IANA timezone of the raw timestamps. The output index is always timezone-naive UTC. Set to `None` if the source is already UTC. |
 # | `REQUEST_DELAY` | `float` | Seconds to wait between requests. Keep ≥ 1.0 (minimum — do not lower). |
+# | `FORCE_REDOWNLOAD` | `bool` | If `True`, re-download every month even if its chunk file already exists in `CACHE_DIR`. Useful after correcting a download bug or updating the station URL. Default: `False`. |
 
 # %%
 # === USER INPUT ===
-STATION_SLUG = 'gubbio'               # Meteosystem station subdirectory
-START_YEAR   = 2020
-END_YEAR     = 2022
-OUTPUT_NAME  = 'meteosystem_gubbio'   # → saved as data/raw/proxies/meteosystem_gubbio.csv
+STATION_SLUG     = 'gubbio'               # Meteosystem station subdirectory
+START_YEAR       = 2020
+END_YEAR         = 2022
+OUTPUT_NAME      = 'meteosystem_gubbio'   # → saved as data/raw/proxies/meteosystem_gubbio.csv
+FORCE_REDOWNLOAD = False                  # True = ignore cache, re-download everything
 
 # Categorical columns to drop (not coercible to numeric, not useful as proxy variables)
 COLUMNS_TO_DROP = ['Dir', 'Dir Raff.']
@@ -119,52 +128,70 @@ REQUEST_DELAY = 1.0             # seconds between HTTP requests (minimum — do 
 
 BASE_URL    = f'https://www.meteosystem.com/dati/{STATION_SLUG}/csv.php'
 OUTPUT_PATH = f'data/raw/proxies/{OUTPUT_NAME}.csv'
+CACHE_DIR   = Path(f'data/raw/proxies/_cache/{STATION_SLUG}')
 
 os.makedirs('data/raw/proxies', exist_ok=True)
-print(f'Station  : {STATION_SLUG}')
-print(f'Range    : {START_YEAR} – {END_YEAR}')
-print(f'Output   : {OUTPUT_PATH}')
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+print(f'Station      : {STATION_SLUG}')
+print(f'Range        : {START_YEAR} – {END_YEAR}')
+print(f'Output       : {OUTPUT_PATH}')
+print(f'Cache dir    : {CACHE_DIR}')
+print(f'Force reload : {FORCE_REDOWNLOAD}')
 
 # %% [markdown]
 # ## Step 2 · Download Monthly CSVs
 #
-# Iterates month by month, constructs the Meteosystem query URL, and accumulates
-# each monthly chunk. The source uses comma as separator and encodes dates as
-# two separate columns (`Data`, `Ora`). Failures are logged but do not abort the
-# loop — a summary of failed months is printed at the end.
+# Iterates month by month, constructs the Meteosystem query URL, and saves each
+# monthly response as an individual CSV file in `CACHE_DIR` (one file per month,
+# named `{year}_{month:02d}.csv`). Months whose cache file already exists are
+# **skipped** unless `FORCE_REDOWNLOAD = True`.
+#
+# This means you only ever download each month once. To fetch newly available
+# months, just extend `END_YEAR` and re-run this step — previously downloaded
+# months are untouched. Steps 3–6 read from the cache and are always safe to
+# re-run independently.
 
 # %%
-all_chunks    = []
 failed_months = []
+n_downloaded  = 0
+n_skipped     = 0
 
 yesterday = date.today() - timedelta(days=1)
 
 # Collect all valid year/month pairs that are not entirely in the future
-months_to_download = []
-for year in range(START_YEAR, END_YEAR + 1):
-    for month in range(1, 13):
-        if date(year, month, 1) > yesterday:
-            break
-        months_to_download.append((year, month))
+months_to_process = [
+    (year, month)
+    for year in range(START_YEAR, END_YEAR + 1)
+    for month in range(1, 13)
+    if date(year, month, 1) <= yesterday
+]
 
-pbar = tqdm(months_to_download, desc="Downloading monthly data")
+pbar = tqdm(months_to_process, desc='Downloading monthly data')
 for year, month in pbar:
+    mm       = f'{month:02d}'
+    label    = f'{mm}/{year}'
+    cache_fp = CACHE_DIR / f'{year}_{mm}.csv'
+
+    # --- Cache hit: skip download ---
+    if cache_fp.exists() and not FORCE_REDOWNLOAD:
+        n_skipped += 1
+        pbar.set_postfix_str(f'{label} [cached]')
+        continue
+
+    # --- Cache miss: download ---
     yy = str(year)[-2:]
     _, last_day = calendar.monthrange(year, month)
-
-    # Cap the end of the month to yesterday
-    month_end = date(year, month, last_day)
+    month_end   = date(year, month, last_day)
     if month_end > yesterday:
         last_day = yesterday.day
-
-    mm = f'{month:02d}'
 
     params = {
         'gg2': '01',               'mm2': mm, 'aa2': yy,
         'gg':  f'{last_day:02d}',  'mm':  mm, 'aa':  yy,
     }
 
-    pbar.set_postfix_str(f"Fetching {mm}/{year}")
+    pbar.set_postfix_str(f'Fetching {label}')
 
     try:
         response = requests.get(BASE_URL, params=params, timeout=30)
@@ -174,52 +201,75 @@ for year, month in pbar:
         if not text:
             continue
 
-        # Strip out PHP warnings that sometimes appear at the top of the response
-        lines = text.split('\n')
+        # Strip PHP warnings that sometimes appear at the top of the response
+        lines     = text.split('\n')
         start_idx = 0
         for i, line in enumerate(lines):
-            # The actual CSV header starts with "Data" and the separator is ";"
             if line.strip().startswith('Data;'):
                 start_idx = i
                 break
 
         clean_text = '\n'.join(lines[start_idx:])
 
-        # Source uses semicolon separator
+        # Validate before saving
         chunk = pd.read_csv(io.StringIO(clean_text), sep=';')
-
         if chunk.empty:
             continue
 
-        all_chunks.append(chunk)
+        # Persist chunk to cache
+        chunk.to_csv(cache_fp, index=False)
+        n_downloaded += 1
 
     except Exception as exc:
-        failed_months.append(f'{mm}/{year}')
+        failed_months.append(label)
+        pbar.write(f'  ✗ {label}: {exc}')
 
     time.sleep(REQUEST_DELAY)
 
-print(f'\nDownload complete.  Chunks collected: {len(all_chunks)}')
+print(f'\nDownload summary')
+print(f'  Downloaded : {n_downloaded}')
+print(f'  Cached     : {n_skipped}')
+print(f'  Failed     : {len(failed_months)}')
 if failed_months:
-    print(f'Failed months ({len(failed_months)}): {", ".join(failed_months)}')
+    print(f'  Failed months: {", ".join(failed_months)}')
 
 # %% [markdown]
-# ## Step 3 · Inspect Raw Columns
+# ## Step 3 · Assemble from Cache
 #
-# Prints the raw column headers. Expected schema:
-# `Data, Ora, Temp, Min, Max, Umid, Dew pt, Vento, Dir, Raffica, Dir Raff., Press, Pioggia, Int.Pio., Rad.Sol.`
+# Reads every CSV file present in `CACHE_DIR` and concatenates them into
+# `df_raw`. This step is completely independent of Step 2 — you can re-run it
+# (and all subsequent steps) without re-downloading anything.
 #
-# If the printed headers differ, update `COLUMNS_TO_DROP` in Step 1 accordingly.
+# Only files matching the `{year}_{month:02d}.csv` pattern within the
+# configured `START_YEAR`–`END_YEAR` range are included, so switching station
+# or date range in Step 1 and re-running from Step 3 is safe.
 
 # %%
-assert all_chunks, (
-    'No data was retrieved. '
-    f'Check the station URL, date range, and network access. '
-    f'Failed months: {failed_months if failed_months else "none recorded"}'
+chunk_files = sorted(
+    CACHE_DIR.glob('*.csv'),
+    key=lambda p: p.stem   # stem is '{year}_{month}' — lexicographic order is correct
 )
 
+# Filter to the configured date range only
+def _in_range(fp: Path) -> bool:
+    try:
+        year, month = (int(x) for x in fp.stem.split('_'))
+        return START_YEAR <= year <= END_YEAR
+    except ValueError:
+        return False
+
+chunk_files = [fp for fp in chunk_files if _in_range(fp)]
+
+assert chunk_files, (
+    f'No cache files found in {CACHE_DIR} for {START_YEAR}–{END_YEAR}. '
+    'Run Step 2 first to download the data.'
+)
+
+all_chunks = [pd.read_csv(fp) for fp in tqdm(chunk_files, desc='Loading cached chunks')]
 df_raw = pd.concat(all_chunks, ignore_index=True)
 df_raw = df_raw.drop_duplicates()
 
+print(f'\nLoaded {len(chunk_files)} chunk files from cache.')
 print(f'Raw shape: {df_raw.shape}')
 print(f'\nRaw columns ({len(df_raw.columns)}):')
 for i, col in enumerate(df_raw.columns):
@@ -270,7 +320,6 @@ if TZ_SOURCE is not None:
         .dt.tz_convert('UTC')
         .dt.tz_localize(None)   # strip tzinfo → timezone-naive UTC
     )
-    # Drop any rows that became NaT due to ambiguous DST transitions
     df = df.dropna(subset=['datetime'])
     print(f'Timezone: {TZ_SOURCE} → UTC (timezone-naive)')
 else:
@@ -306,7 +355,7 @@ for col in df.columns:
 display(df.head(3))
 
 # %% [markdown]
-# ## Step 5 · Validate and Save
+# ## Step 5 · Validate and Plot
 #
 # Validation and save are consolidated into a single cell to prevent a
 # fragile cross-cell dependency on the `validation_ok` flag. Running this cell

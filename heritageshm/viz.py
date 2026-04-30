@@ -506,3 +506,75 @@ def plot_compensation_comparison(
     if save_plot:
         _save_figure(fig, save_path, filename)
     plt.show()
+
+
+def plot_proxy_overview(
+    df,
+    station_slug,
+    n_cols=4,
+    save_plot=False,
+    save_path='outputs/figures',
+    filename='proxy_overview',
+    theme_kwargs=None,
+):
+    """
+    Quick multi-panel time-series overview of the first ``n_cols`` numeric
+    columns in a proxy DataFrame.
+
+    Intended for use in auxiliary proxy-download notebooks (e.g.
+    ``meteosystem_italy``) after data standardisation to visually confirm
+    that the downloaded series are complete and plausible before saving.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Standardised proxy DataFrame with a ``DatetimeIndex`` and numeric
+        columns (output of the standardisation step).
+    station_slug : str
+        Station identifier used in the plot title (e.g. ``'gubbio'``).
+    n_cols : int, optional
+        Maximum number of columns to plot. Default 4.
+    save_plot : bool, optional
+        If ``True``, saves the figure as PNG and SVG via ``_save_figure()``.
+        Default ``False``.
+    save_path : str, optional
+        Directory for saved figures. Default ``'outputs/figures'``.
+    filename : str, optional
+        Base filename without extension. Default ``'proxy_overview'``.
+    theme_kwargs : dict or None, optional
+        Optional keyword arguments forwarded to ``apply_theme()``.
+
+    Returns
+    -------
+    None
+        Displays the figure inline. Saves to disk only if ``save_plot=True``.
+    """
+    if theme_kwargs is not None:
+        apply_theme(**theme_kwargs)
+
+    numeric_cols = df.select_dtypes(include='number').columns.tolist()
+    if not numeric_cols:
+        print('plot_proxy_overview: no numeric columns found — nothing to plot.')
+        return
+
+    n_plot = min(len(numeric_cols), n_cols)
+    fig, axes = plt.subplots(n_plot, 1, figsize=(14, 3 * n_plot), sharex=True)
+    if n_plot == 1:
+        axes = [axes]
+
+    for ax, col in zip(axes, numeric_cols[:n_plot]):
+        ax.plot(df.index, df[col], linewidth=0.5, color='steelblue')
+        ax.set_ylabel(col, fontsize=8)
+        ax.grid(True, alpha=0.3)
+        sns.despine(ax=ax)
+
+    axes[0].set_title(
+        f'Meteosystem {station_slug.capitalize()} \u2014 quick overview',
+        fontsize=10,
+    )
+    fig.autofmt_xdate()
+    plt.tight_layout()
+
+    if save_plot:
+        _save_figure(fig, save_path, filename)
+    plt.show()

@@ -70,8 +70,10 @@
 # ## Imports
 
 # %%
-# [Fix 1] All imports consolidated in this single cell — including tqdm.
+import sys
 import os
+sys.path.insert(0, os.path.abspath('..'))
+
 import io
 import calendar
 import time
@@ -79,55 +81,12 @@ from datetime import date, timedelta
 
 import pandas as pd
 import requests
-import matplotlib.pyplot as plt
 from IPython.display import display
 from tqdm.auto import tqdm
 
+from heritageshm.viz import apply_theme, plot_proxy_overview
 
-# %% [markdown]
-# ## Helper Functions
-
-# %%
-# [Fix 2] Inline plot logic refactored into a named helper.
-def _plot_proxy_overview(df: pd.DataFrame, station_slug: str, n_cols: int = 4) -> None:
-    """
-    Produces a quick multi-panel time-series overview of the proxy dataset.
-
-    Parameters
-    ----------
-    df : pd.DataFrame
-        Standardised proxy DataFrame with a DatetimeIndex and numeric columns.
-    station_slug : str
-        Station identifier used in the plot title (e.g. ``'gubbio'``).
-    n_cols : int, optional
-        Maximum number of columns to plot. Default 4.
-
-    Returns
-    -------
-    None
-        Displays the figure inline; does not save to disk.
-    """
-    numeric_cols = df.select_dtypes(include='number').columns.tolist()
-    if not numeric_cols:
-        print('No numeric columns to plot.')
-        return
-
-    n_plot = min(len(numeric_cols), n_cols)
-    fig, axes = plt.subplots(n_plot, 1, figsize=(14, 3 * n_plot), sharex=True)
-    if n_plot == 1:
-        axes = [axes]
-
-    for ax, col in zip(axes, numeric_cols[:n_plot]):
-        ax.plot(df.index, df[col], linewidth=0.5, color='steelblue')
-        ax.set_ylabel(col, fontsize=8)
-        ax.grid(True, alpha=0.3)
-
-    axes[0].set_title(
-        f'Meteosystem {station_slug.capitalize()} — quick overview', fontsize=10
-    )
-    fig.tight_layout()
-    plt.show()
-
+apply_theme()
 
 # %% [markdown]
 # ## Step 1 · Configuration
@@ -349,12 +308,12 @@ display(df.head(3))
 # %% [markdown]
 # ## Step 5 · Validate and Save
 #
-# [Fix 3] Validation and save are consolidated into a single cell to prevent a
+# Validation and save are consolidated into a single cell to prevent a
 # fragile cross-cell dependency on the `validation_ok` flag. Running this cell
 # from any kernel state is safe: `validation_ok` is always initialised to `True`
 # here before any check, and the save only proceeds if all checks pass.
 #
-# [Fix 4] `expected_end` is capped to yesterday so that setting `END_YEAR` to
+# The `expected_end` is capped to yesterday so that setting `END_YEAR` to
 # the current year does not trigger a spurious coverage warning when data
 # legitimately ends before December 31.
 #
@@ -365,7 +324,6 @@ display(df.head(3))
 # - No non-numeric columns remain
 
 # %%
-# [Fix 3] Always initialised here — safe to re-run in any order.
 validation_ok = True
 
 assert isinstance(df.index, pd.DatetimeIndex), 'Index is not a DatetimeIndex.'
@@ -388,8 +346,6 @@ if non_num:
     print(f'⚠ Non-numeric columns still present (add to COLUMNS_TO_DROP): {non_num}')
     validation_ok = False
 
-# [Fix 4] Cap expected_end to yesterday so current-year END_YEAR does not
-# trigger a false coverage warning when data legitimately ends before Dec 31.
 yesterday_ts   = pd.Timestamp.today().normalize() - pd.Timedelta(days=1)
 expected_start = pd.Timestamp(f'{START_YEAR}-01-01')
 expected_end   = min(pd.Timestamp(f'{END_YEAR}-12-31'), yesterday_ts)
@@ -408,8 +364,8 @@ else:
 
 print(f'\nFinal dataset: {df.shape[0]:,} rows × {df.shape[1]} columns')
 
-# [Fix 2] Quick overview plot — delegated to helper function.
-_plot_proxy_overview(df, station_slug=STATION_SLUG, n_cols=4)
+# Quick overview plot — delegated to heritageshm.viz.plot_proxy_overview
+plot_proxy_overview(df, station_slug=STATION_SLUG, n_cols=4)
 
 # %% [markdown]
 # ## Step 6 · Save

@@ -71,14 +71,16 @@ def _compute_internal_gap_spans(series):
     spans     = []
     in_gap    = False
     gap_start = None
+    prev_ts   = None
 
     for ts, null in zip(interior.index, is_nan):
         if null and not in_gap:
             gap_start = ts
             in_gap    = True
         elif not null and in_gap:
-            spans.append((gap_start, interior.index[interior.index.get_loc(ts) - 1]))
+            spans.append((gap_start, prev_ts))
             in_gap = False
+        prev_ts = ts
 
     if in_gap:
         spans.append((gap_start, interior.index[-1]))

@@ -59,7 +59,7 @@
 # 3. **Assemble** — Load all cached chunk files from disk and concatenate into `df_raw`.
 # 4. **Standardise** — Combine datetime columns, drop categoricals, coerce to numeric.
 # 5. **Validate, clean outliers, and plot** — Check coverage, apply global IQR and rolling
-#    median±MAD outlier filters, and plot with internal-gap highlights.
+#    median±MAD outlier filters (with per-column tuning), and plot with internal-gap highlights.
 # 6. **Save** — Write the final proxy CSV if all validations pass.
 #
 # > **Re-run workflow:** After the first full run of Step 2, you can freely modify and
@@ -369,47 +369,73 @@ display(df.head(3))
 #    columns, no non-numeric columns, and date-range coverage.
 # 2. **Global IQR filter** — replaces extreme point spikes (values outside
 #    `Q1 − k·IQR … Q3 + k·IQR` computed over the full series) with `NaN`.
-#    Catches sensor glitches that produce impossible single-point values.
 # 3. **Rolling median ± MAD filter** — detects sustained sensor malfunctions
-#    that produce physically plausible but locally anomalous values (e.g. a
-#    multi-week period where radiation is near-zero in summer, or temperature
-#    is flat). For each point, computes the local median and MAD over a centred
-#    rolling window; values deviating more than `ROLLING_MAD_FACTOR × MAD` from
-#    the local median are replaced with `NaN`. Because MAD = 0 for perfectly
-#    flat runs, a minimum MAD floor (`MAD_FLOOR`) is applied so that flat-line
-#    artefacts are always flagged.
-# 4. **Overview plot** — plots the selected columns with internal-gap spans
-#    highlighted as crimson bands, using `plot_proxy_overview(highlight_gaps=True)`.
+#    that produce physically plausible but locally anomalous values. Each column
+#    uses its own `window` and `factor` resolved from `ROLLING_MAD_OVERRIDES`
+#    first, then `ROLLING_MAD_DEFAULTS`. Setting a column’s override to `None`
+#    **excludes** it from this filter entirely (recommended for signals with a
+#    strong diurnal zero cycle such as `Rad.Sol.`).
+# 4. **Overview plot** — plots selected columns with internal-gap bands.
 #
-# Both filters write `NaN` in-place on `df`, so Step 6 always saves the cleaned data.
-# Each filter can be independently disabled via its `APPLY_*` flag.
+# ### Why per-column overrides are needed
+#
+# `Rad.Sol.` legitimately hits 0 W/m² every night and ~800–1000 W/m² every
+# midday. A rolling median over any window that spans both day and night will
+# sit at a mid-range value, making every night-time zero look like an extreme
+# downward deviation. The same issue affects highly variable columns such as
+# `Vento` and `Raffica`. The per-column override mechanism lets you skip or
+# loosen the filter for these columns while keeping it tight for slowly-varying
+# ones like `Temp` and `Press`.
 #
 # ### Parameter Tuning Guidance
 #
 # | Parameter | Type | Default | Description |
 # |---|---|---|---|
-# | `PLOT_COLS` | `list[str]` or `None` | `None` | Columns to include in the overview plot. `None` plots all. |
+# | `PLOT_COLS` | `list[str]` or `None` | `None` | Columns to include in the overview plot. `None` = all columns. |
 # | `APPLY_IQR_FILTER` | `bool` | `True` | Enable/disable the global IQR spike filter. |
 # | `OUTLIER_IQR_FACTOR` | `float` | `5.0` | IQR multiplier for global fences. Lower = more aggressive. |
-# | `APPLY_ROLLING_MAD_FILTER` | `bool` | `True` | Enable/disable the rolling MAD filter. |
-# | `ROLLING_MAD_WINDOW` | `int` | `336` | Rolling window size in number of rows. Default 336 = 7 days × 48 half-hour steps. Increase for longer seasonal context; decrease to react faster to short anomalies. |
-# | `ROLLING_MAD_FACTOR` | `float` | `6.0` | Threshold multiplier on the local MAD. Lower = more aggressive flagging (e.g. `4.0`). Raise to `8–10` to flag only severe deviations. |
-# | `MAD_FLOOR` | `float` | `0.1` | Minimum MAD value applied per column before thresholding. Prevents division-by-zero on flat runs and ensures they are always flagged. Scale to units of each column if needed (e.g. set to `1.0` for `Rad.Sol.` in W/m²). |
+# | `APPLY_ROLLING_MAD_FILTER` | `bool` | `True` | Enable/disable the rolling MAD filter entirely. |
+# | `ROLLING_MAD_DEFAULTS` | `dict` | `{'window': 336, 'factor': 6.0, 'floor': 0.1}` | Fallback parameters applied to every column not listed in `ROLLING_MAD_OVERRIDES`. `window` is in rows (336 = 7 days × 48 steps). `factor` is the MAD multiplier. `floor` is the minimum MAD (prevents division-by-zero on flat runs). |
+# | `ROLLING_MAD_OVERRIDES` | `dict[str, dict or None]` | see below | Per-column parameter overrides. Use a `dict` with any subset of `window`/`factor`/`floor` keys to override defaults for that column. Set to `None` to **skip** the filter for that column entirely. |
 # | `HIGHLIGHT_GAPS` | `bool` | `True` | Whether to shade internal NaN runs in the overview plot. |
 
 # %%
 # === USER INPUT ===
-PLOT_COLS                = None   # e.g. ['Temp', 'Umid', 'Rad.Sol.'] or None for all
+PLOT_COLS              = None   # e.g. ['Temp', 'Umid', 'Rad.Sol.'] or None for all
 
-APPLY_IQR_FILTER         = True   # global spike filter
-OUTLIER_IQR_FACTOR       = 5.0    # IQR fence multiplier
+APPLY_IQR_FILTER       = True   # global spike filter
+OUTLIER_IQR_FACTOR     = 5.0    # IQR fence multiplier
 
-APPLY_ROLLING_MAD_FILTER = True   # rolling local-context filter
-ROLLING_MAD_WINDOW       = 336    # rows  (336 × 30 min = 7 days)
-ROLLING_MAD_FACTOR       = 6.0    # threshold = local_median ± factor × MAD
-MAD_FLOOR                = 0.1    # minimum MAD per column (units of the variable)
+APPLY_ROLLING_MAD_FILTER = True  # rolling local-context filter (master switch)
 
-HIGHLIGHT_GAPS           = True
+# Default rolling-MAD parameters applied to every column not listed in overrides.
+ROLLING_MAD_DEFAULTS = {
+    'window': 336,   # 7 days × 48 rows/day
+    'factor': 6.0,   # threshold = local_median ± factor × MAD
+    'floor':  0.1,   # minimum MAD (variable units)
+}
+
+# Per-column overrides.  Any key absent from the dict falls back to ROLLING_MAD_DEFAULTS.
+# Set a column to None to SKIP the rolling-MAD filter for that column entirely.
+#
+# Reasoning for the pre-set values:
+#   Rad.Sol.  → None    : strong diurnal 0→peak cycle confuses rolling median;
+#                          rely on global IQR only for this column.
+#   Vento     → factor 10: wind is inherently bursty; a tighter factor causes
+#                          legitimate gusts to be flagged as anomalies.
+#   Raffica   → factor 10: same reason as Vento.
+#   Pioggia   → None    : precipitation is zero-inflated; rolling median is
+#                          almost always 0, making MAD unreliable.
+#   Int.Pio.  → None    : same reason as Pioggia.
+ROLLING_MAD_OVERRIDES = {
+    'Rad.Sol.': None,
+    'Vento':    {'factor': 10.0},
+    'Raffica':  {'factor': 10.0},
+    'Pioggia':  None,
+    'Int.Pio.': None,
+}
+
+HIGHLIGHT_GAPS = True
 # ==================
 
 validation_ok = True
@@ -485,42 +511,51 @@ else:
 # ------------------------------------------------------------------
 # 3. Rolling median ± MAD filter — catches sustained malfunctions
 #
-# For each column the filter:
-#   a) Computes a centred rolling median over ROLLING_MAD_WINDOW rows.
-#   b) Computes the rolling MAD (median absolute deviation) over the same
-#      window and clamps it to an effective floor to handle flat-line
-#      artefacts and very low-variance columns.
-#   c) Flags any value whose absolute deviation from the local median
-#      exceeds ROLLING_MAD_FACTOR × clamped_MAD.
+# For each column the filter resolves its parameters by merging
+# ROLLING_MAD_DEFAULTS with the column's entry in ROLLING_MAD_OVERRIDES
+# (if any). A column whose override is None is skipped entirely.
 #
-# The rolling statistics are computed on the already-IQR-cleaned series so
-# that the MAD estimate is not inflated by residual spikes.
+# For each processed column:
+#   a) Compute a centred rolling median over `window` rows.
+#   b) Compute the rolling MAD over the same window.
+#   c) Clamp MAD to max(floor, 10% of global-median MAD) so that flat-line
+#      artefacts and low-variance columns are handled correctly.
+#   d) Flag values where |value - rolling_median| > factor * clamped_MAD.
 # ------------------------------------------------------------------
 if APPLY_ROLLING_MAD_FILTER:
-    print(f'\n── Rolling median±MAD filter '
-          f'(window={ROLLING_MAD_WINDOW}, factor={ROLLING_MAD_FACTOR}, floor={MAD_FLOOR}) ──')
+    print(f'\n── Rolling median±MAD filter (per-column parameters) ──')
     total_replaced = 0
+    skipped_cols   = []
+
     for col in df.columns:
+        # Resolve override: None means skip; missing key means use defaults.
+        override = ROLLING_MAD_OVERRIDES.get(col, {})   # {} = not listed
+        if override is None:
+            skipped_cols.append(col)
+            continue
+
+        # Merge defaults with any per-column overrides.
+        params  = {**ROLLING_MAD_DEFAULTS, **override}
+        window  = params['window']
+        factor  = params['factor']
+        floor   = params['floor']
+
         s = df[col]
         if s.isnull().all():
             continue
 
-        min_periods = ROLLING_MAD_WINDOW // 4
-        roll        = s.rolling(window=ROLLING_MAD_WINDOW, center=True, min_periods=min_periods)
+        min_periods = window // 4
+        roll        = s.rolling(window=window, center=True, min_periods=min_periods)
         roll_median = roll.median()
         roll_mad    = (s - roll_median).abs().rolling(
-                          window=ROLLING_MAD_WINDOW, center=True,
-                          min_periods=min_periods
+                          window=window, center=True, min_periods=min_periods
                       ).median()
 
-        # Effective MAD floor: the larger of MAD_FLOOR and 10% of the
-        # global median MAD, so the floor self-scales to the variable's
-        # natural noise level and avoids over-flagging low-variance columns.
         global_mad_median = roll_mad.median()
-        effective_floor   = max(MAD_FLOOR, global_mad_median * 0.1)
+        effective_floor   = max(floor, global_mad_median * 0.1)
         roll_mad_clamped  = roll_mad.clip(lower=effective_floor)
 
-        threshold = ROLLING_MAD_FACTOR * roll_mad_clamped
+        threshold = factor * roll_mad_clamped
         deviation = (s - roll_median).abs()
         mask      = (deviation > threshold) & roll_mad_clamped.notna()
 
@@ -528,11 +563,15 @@ if APPLY_ROLLING_MAD_FILTER:
         if n_out > 0:
             df.loc[mask, col] = np.nan
             total_replaced += n_out
-            print(f'  {col:<20}  {n_out:>6,} anomalous values → NaN')
+            print(f'  {col:<20}  {n_out:>6,} anomalous values → NaN  '
+                  f'(window={window}, factor={factor})')
+
     if total_replaced == 0:
-        print('  ✓ No sustained anomalies detected in any column.')
+        print('  ✓ No sustained anomalies detected in any processed column.')
     else:
         print(f'  Total replaced: {total_replaced:,} values')
+    if skipped_cols:
+        print(f'  Skipped (override=None): {", ".join(skipped_cols)}')
 else:
     print('\n── Rolling MAD filter skipped (APPLY_ROLLING_MAD_FILTER = False) ──')
 

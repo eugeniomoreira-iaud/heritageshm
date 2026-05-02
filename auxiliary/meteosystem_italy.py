@@ -58,7 +58,8 @@
 # 2. **Download** — Fetch missing monthly CSVs from Meteosystem; already-cached months are skipped.
 # 3. **Assemble** — Load all cached chunk files from disk and concatenate into `df_raw`.
 # 4. **Standardise** — Combine datetime columns, drop categoricals, coerce to numeric.
-# 5. **Validate, clean outliers, and plot** — Check coverage, apply IQR outlier filter, and plot with internal-gap highlights.
+# 5. **Validate, clean outliers, and plot** — Check coverage, apply global IQR and rolling
+#    median±MAD outlier filters, and plot with internal-gap highlights.
 # 6. **Save** — Write the final proxy CSV if all validations pass.
 #
 # > **Re-run workflow:** After the first full run of Step 2, you can freely modify and
@@ -366,32 +367,49 @@ display(df.head(3))
 # Runs four sub-tasks in sequence:
 # 1. **Structural validation** — checks sorted index, timezone-naive, no all-NaN
 #    columns, no non-numeric columns, and date-range coverage.
-# 2. **Outlier filter** — replaces values outside the IQR fence with `NaN`
-#    directly on `df`, so the cleaned data is what gets saved in Step 6.
-# 3. **Overview plot** — plots the selected columns with internal-gap spans
+# 2. **Global IQR filter** — replaces extreme point spikes (values outside
+#    `Q1 − k·IQR … Q3 + k·IQR` computed over the full series) with `NaN`.
+#    Catches sensor glitches that produce impossible single-point values.
+# 3. **Rolling median ± MAD filter** — detects sustained sensor malfunctions
+#    that produce physically plausible but locally anomalous values (e.g. a
+#    multi-week period where radiation is near-zero in summer, or temperature
+#    is flat). For each point, computes the local median and MAD over a centred
+#    rolling window; values deviating more than `ROLLING_MAD_FACTOR × MAD` from
+#    the local median are replaced with `NaN`. Because MAD = 0 for perfectly
+#    flat runs, a minimum MAD floor (`MAD_FLOOR`) is applied so that flat-line
+#    artefacts are always flagged.
+# 4. **Overview plot** — plots the selected columns with internal-gap spans
 #    highlighted as crimson bands, using `plot_proxy_overview(highlight_gaps=True)`.
-#    Internal gaps are computed per column by `_compute_internal_gap_spans` inside
-#    `viz.py`, so no duplicate gap logic is needed here.
 #
-# The `expected_end` is capped to yesterday to avoid a spurious coverage warning
-# when `END_YEAR` is the current year and the series legitimately ends before
-# December 31.
+# Both filters write `NaN` in-place on `df`, so Step 6 always saves the cleaned data.
+# Each filter can be independently disabled via its `APPLY_*` flag.
 #
 # ### Parameter Tuning Guidance
 #
 # | Parameter | Type | Default | Description |
 # |---|---|---|---|
-# | `PLOT_COLS` | `list[str]` or `None` | `None` | Columns to include in the overview plot. Set to a list (e.g. `['Temp', 'Umid', 'Rad.Sol.']`) to restrict the view. `None` plots all columns. |
-# | `OUTLIER_IQR_FACTOR` | `float` | `5.0` | Multiplier on the IQR used to define outlier fences per column. Lower values are more aggressive (e.g. `3.0`); raise to `10.0` to only catch extreme spikes. |
-# | `APPLY_OUTLIER_FILTER` | `bool` | `True` | Set to `False` to skip outlier replacement entirely and inspect raw data first. |
-# | `HIGHLIGHT_GAPS` | `bool` | `True` | Whether to shade internal NaN runs in the overview plot. Delegates to `plot_proxy_overview(highlight_gaps=...)`. |
+# | `PLOT_COLS` | `list[str]` or `None` | `None` | Columns to include in the overview plot. `None` plots all. |
+# | `APPLY_IQR_FILTER` | `bool` | `True` | Enable/disable the global IQR spike filter. |
+# | `OUTLIER_IQR_FACTOR` | `float` | `5.0` | IQR multiplier for global fences. Lower = more aggressive. |
+# | `APPLY_ROLLING_MAD_FILTER` | `bool` | `True` | Enable/disable the rolling MAD filter. |
+# | `ROLLING_MAD_WINDOW` | `int` | `336` | Rolling window size in number of rows. Default 336 = 7 days × 48 half-hour steps. Increase for longer seasonal context; decrease to react faster to short anomalies. |
+# | `ROLLING_MAD_FACTOR` | `float` | `6.0` | Threshold multiplier on the local MAD. Lower = more aggressive flagging (e.g. `4.0`). Raise to `8–10` to flag only severe deviations. |
+# | `MAD_FLOOR` | `float` | `0.1` | Minimum MAD value applied per column before thresholding. Prevents division-by-zero on flat runs and ensures they are always flagged. Scale to units of each column if needed (e.g. set to `1.0` for `Rad.Sol.` in W/m²). |
+# | `HIGHLIGHT_GAPS` | `bool` | `True` | Whether to shade internal NaN runs in the overview plot. |
 
 # %%
 # === USER INPUT ===
-PLOT_COLS            = None   # e.g. ['Temp', 'Umid', 'Rad.Sol.'] or None for all columns
-OUTLIER_IQR_FACTOR   = 5.0    # IQR fence multiplier
-APPLY_OUTLIER_FILTER = True   # False = skip outlier replacement entirely
-HIGHLIGHT_GAPS      = True   # False = suppress crimson gap bands in the plot
+PLOT_COLS                = None   # e.g. ['Temp', 'Umid', 'Rad.Sol.'] or None for all
+
+APPLY_IQR_FILTER         = True   # global spike filter
+OUTLIER_IQR_FACTOR       = 5.0    # IQR fence multiplier
+
+APPLY_ROLLING_MAD_FILTER = True   # rolling local-context filter
+ROLLING_MAD_WINDOW       = 336    # rows  (336 × 30 min = 7 days)
+ROLLING_MAD_FACTOR       = 6.0    # threshold = local_median ± factor × MAD
+MAD_FLOOR                = 0.1    # minimum MAD per column (units of the variable)
+
+HIGHLIGHT_GAPS           = True
 # ==================
 
 validation_ok = True
@@ -438,10 +456,10 @@ else:
 print(f'\nFinal dataset: {df.shape[0]:,} rows × {df.shape[1]} columns')
 
 # ------------------------------------------------------------------
-# 2. IQR outlier filter  (applied to df — affects saved output)
+# 2. Global IQR filter — catches extreme point spikes
 # ------------------------------------------------------------------
-if APPLY_OUTLIER_FILTER:
-    print(f'\n── Outlier filter (IQR × {OUTLIER_IQR_FACTOR}) ──')
+if APPLY_IQR_FILTER:
+    print(f'\n── Global IQR filter (IQR × {OUTLIER_IQR_FACTOR}) ──')
     total_replaced = 0
     for col in df.columns:
         q1  = df[col].quantile(0.25)
@@ -452,7 +470,7 @@ if APPLY_OUTLIER_FILTER:
         lower = q1 - OUTLIER_IQR_FACTOR * iqr
         upper = q3 + OUTLIER_IQR_FACTOR * iqr
         mask  = (df[col] < lower) | (df[col] > upper)
-        n_out = mask.sum()
+        n_out = int(mask.sum())
         if n_out > 0:
             df.loc[mask, col] = np.nan
             total_replaced += n_out
@@ -462,10 +480,64 @@ if APPLY_OUTLIER_FILTER:
     else:
         print(f'  Total replaced: {total_replaced:,} values')
 else:
-    print('\n── Outlier filter skipped (APPLY_OUTLIER_FILTER = False) ──')
+    print('\n── Global IQR filter skipped (APPLY_IQR_FILTER = False) ──')
 
 # ------------------------------------------------------------------
-# 3. Overview plot — gap bands rendered inside plot_proxy_overview
+# 3. Rolling median ± MAD filter — catches sustained malfunctions
+#
+# For each column the filter:
+#   a) Computes a centred rolling median over ROLLING_MAD_WINDOW rows.
+#   b) Computes the rolling MAD (median absolute deviation) over the same
+#      window and clamps it to an effective floor to handle flat-line
+#      artefacts and very low-variance columns.
+#   c) Flags any value whose absolute deviation from the local median
+#      exceeds ROLLING_MAD_FACTOR × clamped_MAD.
+#
+# The rolling statistics are computed on the already-IQR-cleaned series so
+# that the MAD estimate is not inflated by residual spikes.
+# ------------------------------------------------------------------
+if APPLY_ROLLING_MAD_FILTER:
+    print(f'\n── Rolling median±MAD filter '
+          f'(window={ROLLING_MAD_WINDOW}, factor={ROLLING_MAD_FACTOR}, floor={MAD_FLOOR}) ──')
+    total_replaced = 0
+    for col in df.columns:
+        s = df[col]
+        if s.isnull().all():
+            continue
+
+        min_periods = ROLLING_MAD_WINDOW // 4
+        roll        = s.rolling(window=ROLLING_MAD_WINDOW, center=True, min_periods=min_periods)
+        roll_median = roll.median()
+        roll_mad    = (s - roll_median).abs().rolling(
+                          window=ROLLING_MAD_WINDOW, center=True,
+                          min_periods=min_periods
+                      ).median()
+
+        # Effective MAD floor: the larger of MAD_FLOOR and 10% of the
+        # global median MAD, so the floor self-scales to the variable's
+        # natural noise level and avoids over-flagging low-variance columns.
+        global_mad_median = roll_mad.median()
+        effective_floor   = max(MAD_FLOOR, global_mad_median * 0.1)
+        roll_mad_clamped  = roll_mad.clip(lower=effective_floor)
+
+        threshold = ROLLING_MAD_FACTOR * roll_mad_clamped
+        deviation = (s - roll_median).abs()
+        mask      = (deviation > threshold) & roll_mad_clamped.notna()
+
+        n_out = int(mask.sum())
+        if n_out > 0:
+            df.loc[mask, col] = np.nan
+            total_replaced += n_out
+            print(f'  {col:<20}  {n_out:>6,} anomalous values → NaN')
+    if total_replaced == 0:
+        print('  ✓ No sustained anomalies detected in any column.')
+    else:
+        print(f'  Total replaced: {total_replaced:,} values')
+else:
+    print('\n── Rolling MAD filter skipped (APPLY_ROLLING_MAD_FILTER = False) ──')
+
+# ------------------------------------------------------------------
+# 4. Overview plot — gap bands rendered inside plot_proxy_overview
 # ------------------------------------------------------------------
 df_plot = df[PLOT_COLS] if PLOT_COLS is not None else df
 plot_proxy_overview(

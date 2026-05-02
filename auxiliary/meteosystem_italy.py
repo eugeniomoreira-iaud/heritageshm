@@ -58,7 +58,7 @@
 # 2. **Download** — Fetch missing monthly CSVs from Meteosystem; already-cached months are skipped.
 # 3. **Assemble** — Load all cached chunk files from disk and concatenate into `df_raw`.
 # 4. **Standardise** — Combine datetime columns, drop categoricals, coerce to numeric.
-# 5. **Validate and plot** — Check coverage, sorted index, and missing-value rate.
+# 5. **Validate and plot** — Check coverage, sorted index, missing-value rate, internal gaps, and outliers.
 # 6. **Save** — Write the final proxy CSV if all validations pass.
 #
 # > **Re-run workflow:** After the first full run of Step 2, you can freely modify and
@@ -355,26 +355,36 @@ for col in df.columns:
 display(df.head(3))
 
 # %% [markdown]
-# ## Step 5 · Validate and Plot
+# ## Step 5 · Validate, Clean Outliers, and Plot
 #
-# Validation and save are consolidated into a single cell to prevent a
-# fragile cross-cell dependency on the `validation_ok` flag. Running this cell
-# from any kernel state is safe: `validation_ok` is always initialised to `True`
-# here before any check, and the save only proceeds if all checks pass.
+# ### Parameter Tuning Guidance
 #
-# The `expected_end` is capped to yesterday so that setting `END_YEAR` to
-# the current year does not trigger a spurious coverage warning when data
-# legitimately ends before December 31.
+# | Parameter | Type | Default | Description |
+# |---|---|---|---|
+# | `PLOT_COLS` | `list[str]` or `None` | `None` | Columns to include in the overview plot. Set to a list of column names to restrict the plot to those variables (e.g. `['Temp', 'Umid', 'Rad.Sol.']`). Set to `None` to plot all columns. |
+# | `OUTLIER_IQR_FACTOR` | `float` | `5.0` | Multiplier on the IQR used to define outlier fences per column. Lower values are more aggressive (e.g. `3.0`); higher values are more conservative (e.g. `10.0`). Outliers are replaced with `NaN` **in `df` before saving** — they are not merely hidden in the plot. |
+# | `APPLY_OUTLIER_FILTER` | `bool` | `True` | If `False`, the IQR filter is skipped entirely and outliers are left as-is. Set to `False` if you want to inspect the raw data before deciding on cleaning. |
 #
-# Checks that the output satisfies the Notebook 01 proxy contract:
-# - Index is a sorted, timezone-naive `DatetimeIndex`
-# - No column is entirely `NaN`
-# - Dataset covers the requested date range (capped to yesterday)
-# - No non-numeric columns remain
+# This step runs four sub-tasks in order:
+# 1. **Structural validation** — sorted index, timezone-naive, no all-NaN columns, no non-numeric columns, date-range coverage.
+# 2. **Internal-gap report** — for each column, counts NaN values that fall *between* the first and last valid observation (i.e. true internal gaps, not leading/trailing missing data).
+# 3. **Outlier filter** — replaces values outside `[Q1 − k·IQR, Q3 + k·IQR]` with `NaN`. Applied to `df` directly so that cleaned data is what gets saved in Step 6.
+# 4. **Overview plot** — plots the selected columns after cleaning so the chart reflects the final saved state.
 
 # %%
+# === USER INPUT ===
+PLOT_COLS            = None   # e.g. ['Temp', 'Umid', 'Rad.Sol.'] or None for all columns
+OUTLIER_IQR_FACTOR   = 5.0    # IQR fence multiplier — increase to keep more data
+APPLY_OUTLIER_FILTER = True   # False = skip outlier replacement entirely
+# ==================
+
+import numpy as np
+
 validation_ok = True
 
+# ------------------------------------------------------------------
+# 1. Structural validation
+# ------------------------------------------------------------------
 assert isinstance(df.index, pd.DatetimeIndex), 'Index is not a DatetimeIndex.'
 
 if not df.index.is_monotonic_increasing:
@@ -407,14 +417,73 @@ if df.index.max() < expected_end:
     validation_ok = False
 
 if validation_ok:
-    print('✓ All validation checks passed.')
+    print('✓ All structural validation checks passed.')
 else:
     print('\n⚠ Some checks failed — review warnings above before saving.')
 
 print(f'\nFinal dataset: {df.shape[0]:,} rows × {df.shape[1]} columns')
 
-# Quick overview plot — delegated to heritageshm.viz.plot_proxy_overview
-plot_proxy_overview(df, station_slug=STATION_SLUG, n_cols=4)
+# ------------------------------------------------------------------
+# 2. Internal-gap report
+# ------------------------------------------------------------------
+print('\n── Internal-gap report (NaNs between first and last valid observation) ──')
+cols_to_check = PLOT_COLS if PLOT_COLS is not None else df.columns.tolist()
+any_internal_gaps = False
+for col in cols_to_check:
+    if col not in df.columns:
+        print(f'  {col:<20}  ⚠ column not found — check PLOT_COLS spelling')
+        continue
+    series = df[col]
+    first_valid = series.first_valid_index()
+    last_valid  = series.last_valid_index()
+    if first_valid is None:
+        print(f'  {col:<20}  entirely NaN — skipped')
+        continue
+    interior = series.loc[first_valid:last_valid]
+    n_internal = interior.isnull().sum()
+    pct_internal = n_internal / len(interior) * 100 if len(interior) > 0 else 0.0
+    status = f'  {col:<20}  {n_internal:>6,} internal NaNs  ({pct_internal:.2f}%)'
+    if n_internal > 0:
+        print(f'⚠ {status}')
+        any_internal_gaps = True
+    else:
+        print(f'✓ {status}')
+
+if not any_internal_gaps:
+    print('✓ No internal gaps detected in any plotted column.')
+
+# ------------------------------------------------------------------
+# 3. IQR outlier filter  (applied to df — affects saved output)
+# ------------------------------------------------------------------
+if APPLY_OUTLIER_FILTER:
+    print(f'\n── Outlier filter (IQR × {OUTLIER_IQR_FACTOR}) ──')
+    total_replaced = 0
+    for col in df.columns:
+        q1  = df[col].quantile(0.25)
+        q3  = df[col].quantile(0.75)
+        iqr = q3 - q1
+        if iqr == 0:
+            continue   # constant column — skip to avoid degenerate fence
+        lower = q1 - OUTLIER_IQR_FACTOR * iqr
+        upper = q3 + OUTLIER_IQR_FACTOR * iqr
+        mask  = (df[col] < lower) | (df[col] > upper)
+        n_out = mask.sum()
+        if n_out > 0:
+            df.loc[mask, col] = np.nan
+            total_replaced += n_out
+            print(f'  {col:<20}  {n_out:>6,} outliers → NaN  (fence: [{lower:.3g}, {upper:.3g}])')
+    if total_replaced == 0:
+        print('  ✓ No outliers detected in any column.')
+    else:
+        print(f'  Total replaced: {total_replaced:,} values')
+else:
+    print('\n── Outlier filter skipped (APPLY_OUTLIER_FILTER = False) ──')
+
+# ------------------------------------------------------------------
+# 4. Overview plot — reflects cleaned data
+# ------------------------------------------------------------------
+df_plot = df[PLOT_COLS] if PLOT_COLS is not None else df
+plot_proxy_overview(df_plot, station_slug=STATION_SLUG, n_cols=4)
 
 # %% [markdown]
 # ## Step 6 · Save

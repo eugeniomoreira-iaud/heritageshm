@@ -58,7 +58,7 @@
 # 2. **Download** — Fetch missing monthly CSVs from Meteosystem; already-cached months are skipped.
 # 3. **Assemble** — Load all cached chunk files from disk and concatenate into `df_raw`.
 # 4. **Standardise** — Combine datetime columns, drop categoricals, coerce to numeric.
-# 5. **Validate and plot** — Check coverage, sorted index, missing-value rate, internal gaps, and outliers.
+# 5. **Validate, clean outliers, and plot** — Check coverage, apply IQR outlier filter, and plot with internal-gap highlights.
 # 6. **Save** — Write the final proxy CSV if all validations pass.
 #
 # > **Re-run workflow:** After the first full run of Step 2, you can freely modify and
@@ -83,6 +83,7 @@ sys.path.insert(0, os.path.abspath('..'))
 import io
 import calendar
 import time
+import numpy as np
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -106,7 +107,7 @@ apply_theme()
 # | `START_YEAR` | `int` | First year to download (inclusive). |
 # | `END_YEAR` | `int` | Last year to download (inclusive). |
 # | `OUTPUT_NAME` | `str` | Base filename written to `data/raw/proxies/`. Set `PROXY_FILE` in Notebook 01 to this path. |
-# | `COLUMNS_TO_DROP` | `list` | Columns to remove before saving. Used for categorical columns (`Dir`, `Dir Raff.`) that cannot be used as numeric proxy variables. Add any other unwanted columns here. |
+# | `COLUMNS_TO_DROP` | `list[str]` | Columns to remove before saving. Used for categorical columns (`Dir`, `Dir Raff.`) that cannot be used as numeric proxy variables. Add any other unwanted columns here. |
 # | `TZ_SOURCE` | `str` or `None` | IANA timezone of the raw timestamps. The output index is always timezone-naive UTC. Set to `None` if the source is already UTC. |
 # | `REQUEST_DELAY` | `float` | Seconds to wait between requests. Keep ≥ 1.0 (minimum — do not lower). |
 # | `FORCE_REDOWNLOAD` | `bool` | If `True`, re-download every month even if its chunk file already exists in `CACHE_DIR`. Useful after correcting a download bug or updating the station URL. Default: `False`. |
@@ -119,11 +120,10 @@ END_YEAR         = 2022
 OUTPUT_NAME      = 'meteosystem_gubbio'   # → saved as data/raw/proxies/meteosystem_gubbio.csv
 FORCE_REDOWNLOAD = False                  # True = ignore cache, re-download everything
 
-# Categorical columns to drop (not coercible to numeric, not useful as proxy variables)
 COLUMNS_TO_DROP = ['Dir', 'Dir Raff.']
 
-TZ_SOURCE     = 'Europe/Rome'   # Raw timestamps are local Italian time (CET/CEST)
-REQUEST_DELAY = 1.0             # seconds between HTTP requests (minimum — do not lower)
+TZ_SOURCE     = 'Europe/Rome'
+REQUEST_DELAY = 1.0
 # ==================
 
 BASE_URL    = f'https://www.meteosystem.com/dati/{STATION_SLUG}/csv.php'
@@ -142,15 +142,25 @@ print(f'Force reload : {FORCE_REDOWNLOAD}')
 # %% [markdown]
 # ## Step 2 · Download Monthly CSVs
 #
-# Iterates month by month, constructs the Meteosystem query URL, and saves each
-# monthly response as an individual CSV file in `CACHE_DIR` (one file per month,
-# named `{year}_{month:02d}.csv`). Months whose cache file already exists are
-# **skipped** unless `FORCE_REDOWNLOAD = True`.
+# Iterates month by month over the configured `START_YEAR`–`END_YEAR` range,
+# constructs the Meteosystem query URL for each month, and saves the response as
+# an individual CSV file in `CACHE_DIR`. Months whose cache file already exists
+# are **skipped** unless `FORCE_REDOWNLOAD = True`.
 #
 # This means you only ever download each month once. To fetch newly available
-# months, just extend `END_YEAR` and re-run this step — previously downloaded
-# months are untouched. Steps 3–6 read from the cache and are always safe to
-# re-run independently.
+# months, extend `END_YEAR` and re-run this step — previously downloaded months
+# are untouched. Steps 3–6 read from the cache and are always safe to re-run
+# independently.
+#
+# ### Parameter Tuning Guidance
+#
+# | Parameter | Where set | Description |
+# |---|---|---|
+# | `START_YEAR` | Step 1 | First year to download. Extend backwards to retrieve older data. |
+# | `END_YEAR` | Step 1 | Last year to download. Extend forwards to fetch newly published months. |
+# | `FORCE_REDOWNLOAD` | Step 1 | Set to `True` to discard all cached CSVs and re-download from scratch (e.g. after a known source correction). |
+# | `REQUEST_DELAY` | Step 1 | Minimum pause between HTTP requests (seconds). Do not set below `1.0` to avoid server-side rate limiting. |
+# | `CACHE_DIR` | Derived in Step 1 | Destination folder for monthly CSVs. Change `STATION_SLUG` in Step 1 to redirect the cache to a different sub-directory. |
 
 # %%
 failed_months = []
@@ -159,7 +169,6 @@ n_skipped     = 0
 
 yesterday = date.today() - timedelta(days=1)
 
-# Collect all valid year/month pairs that are not entirely in the future
 months_to_process = [
     (year, month)
     for year in range(START_YEAR, END_YEAR + 1)
@@ -173,13 +182,11 @@ for year, month in pbar:
     label    = f'{mm}/{year}'
     cache_fp = CACHE_DIR / f'{year}_{mm}.csv'
 
-    # --- Cache hit: skip download ---
     if cache_fp.exists() and not FORCE_REDOWNLOAD:
         n_skipped += 1
         pbar.set_postfix_str(f'{label} [cached]')
         continue
 
-    # --- Cache miss: download ---
     yy = str(year)[-2:]
     _, last_day = calendar.monthrange(year, month)
     month_end   = date(year, month, last_day)
@@ -201,7 +208,6 @@ for year, month in pbar:
         if not text:
             continue
 
-        # Strip PHP warnings that sometimes appear at the top of the response
         lines     = text.split('\n')
         start_idx = 0
         for i, line in enumerate(lines):
@@ -211,12 +217,10 @@ for year, month in pbar:
 
         clean_text = '\n'.join(lines[start_idx:])
 
-        # Validate before saving
         chunk = pd.read_csv(io.StringIO(clean_text), sep=';')
         if chunk.empty:
             continue
 
-        # Persist chunk to cache
         chunk.to_csv(cache_fp, index=False)
         n_downloaded += 1
 
@@ -236,21 +240,28 @@ if failed_months:
 # %% [markdown]
 # ## Step 3 · Assemble from Cache
 #
-# Reads every CSV file present in `CACHE_DIR` and concatenates them into
-# `df_raw`. This step is completely independent of Step 2 — you can re-run it
-# (and all subsequent steps) without re-downloading anything.
+# Reads every CSV file present in `CACHE_DIR` that falls within the configured
+# `START_YEAR`–`END_YEAR` range and concatenates them into a single `df_raw`
+# DataFrame. This step is completely independent of Step 2 — you can re-run it
+# (and all subsequent steps) at any time without re-downloading anything.
 #
-# Only files matching the `{year}_{month:02d}.csv` pattern within the
-# configured `START_YEAR`–`END_YEAR` range are included, so switching station
-# or date range in Step 1 and re-running from Step 3 is safe.
+# Duplicate rows that may arise from overlapping monthly exports are dropped
+# before `df_raw` is returned.
+#
+# ### Parameter Tuning Guidance
+#
+# | Parameter | Where set | Description |
+# |---|---|---|
+# | `START_YEAR` | Step 1 | Controls which yearly sub-directories are included in the assembly. Change to narrow or widen the assembled window without touching the cache. |
+# | `END_YEAR` | Step 1 | Upper bound of the assembled window (inclusive). |
+# | `CACHE_DIR` | Derived in Step 1 | Source directory scanned for `{year}_{month:02d}.csv` files. |
 
 # %%
 chunk_files = sorted(
     CACHE_DIR.glob('*.csv'),
-    key=lambda p: p.stem   # stem is '{year}_{month}' — lexicographic order is correct
+    key=lambda p: p.stem
 )
 
-# Filter to the configured date range only
 def _in_range(fp: Path) -> bool:
     try:
         year, month = (int(x) for x in fp.stem.split('_'))
@@ -282,10 +293,10 @@ display(df_raw.head(3))
 #
 # ### Parameter Tuning Guidance
 #
-# | Parameter | Where | Description |
+# | Parameter | Where set | Description |
 # |---|---|---|
-# | `COLUMNS_TO_DROP` | Step 1 | Add any column names you want to exclude from the output. |
-# | `TZ_SOURCE` | Step 1 | IANA timezone string for the raw timestamps. Meteosystem Italy serves local time (CET in winter, CEST in summer). Output is always timezone-naive UTC. |
+# | `COLUMNS_TO_DROP` | Step 1 | Add any column names you want to exclude from the output. Categorical columns (`Dir`, `Dir Raff.`) are already listed; add others as needed. |
+# | `TZ_SOURCE` | Step 1 | IANA timezone string for the raw timestamps. Meteosystem Italy serves local time (CET in winter, CEST in summer). Output is always timezone-naive UTC. Set to `None` if the source is already UTC. |
 #
 # The `Data` and `Ora` columns are combined into a single `datetime` string
 # before parsing. Both columns are then dropped. All remaining columns are
@@ -294,7 +305,6 @@ display(df_raw.head(3))
 # %%
 df = df_raw.copy()
 
-# --- Combine Data + Ora into a single datetime column ---
 assert 'Data' in df.columns and 'Ora' in df.columns, (
     "Expected columns 'Data' and 'Ora' not found. "
     "Check Step 3 output for the actual date/time column names."
@@ -312,31 +322,27 @@ if n_unparsed:
     print(f'⚠ {n_unparsed} rows had unparseable datetime values — dropped.')
     df = df.dropna(subset=['datetime'])
 
-# --- Timezone conversion → UTC naive ---
 if TZ_SOURCE is not None:
     df['datetime'] = (
         df['datetime']
         .dt.tz_localize(TZ_SOURCE, ambiguous='NaT', nonexistent='shift_forward')
         .dt.tz_convert('UTC')
-        .dt.tz_localize(None)   # strip tzinfo → timezone-naive UTC
+        .dt.tz_localize(None)
     )
     df = df.dropna(subset=['datetime'])
     print(f'Timezone: {TZ_SOURCE} → UTC (timezone-naive)')
 else:
     print('Timezone: no conversion applied (assumed UTC).')
 
-# --- Set datetime as index ---
 df = df.set_index('datetime')
 df.index.name = 'datetime'
 df = df.sort_index()
 
-# --- Drop categorical / unwanted columns ---
 cols_to_drop = [c for c in COLUMNS_TO_DROP if c in df.columns]
 if cols_to_drop:
     df = df.drop(columns=cols_to_drop)
     print(f'Dropped columns    : {cols_to_drop}')
 
-# --- Coerce all remaining columns to numeric ---
 for col in df.columns:
     df[col] = pd.to_numeric(df[col], errors='coerce')
 
@@ -357,28 +363,36 @@ display(df.head(3))
 # %% [markdown]
 # ## Step 5 · Validate, Clean Outliers, and Plot
 #
+# Runs four sub-tasks in sequence:
+# 1. **Structural validation** — checks sorted index, timezone-naive, no all-NaN
+#    columns, no non-numeric columns, and date-range coverage.
+# 2. **Outlier filter** — replaces values outside the IQR fence with `NaN`
+#    directly on `df`, so the cleaned data is what gets saved in Step 6.
+# 3. **Overview plot** — plots the selected columns with internal-gap spans
+#    highlighted as crimson bands, using `plot_proxy_overview(highlight_gaps=True)`.
+#    Internal gaps are computed per column by `_compute_internal_gap_spans` inside
+#    `viz.py`, so no duplicate gap logic is needed here.
+#
+# The `expected_end` is capped to yesterday to avoid a spurious coverage warning
+# when `END_YEAR` is the current year and the series legitimately ends before
+# December 31.
+#
 # ### Parameter Tuning Guidance
 #
 # | Parameter | Type | Default | Description |
 # |---|---|---|---|
-# | `PLOT_COLS` | `list[str]` or `None` | `None` | Columns to include in the overview plot. Set to a list of column names to restrict the plot to those variables (e.g. `['Temp', 'Umid', 'Rad.Sol.']`). Set to `None` to plot all columns. |
-# | `OUTLIER_IQR_FACTOR` | `float` | `5.0` | Multiplier on the IQR used to define outlier fences per column. Lower values are more aggressive (e.g. `3.0`); higher values are more conservative (e.g. `10.0`). Outliers are replaced with `NaN` **in `df` before saving** — they are not merely hidden in the plot. |
-# | `APPLY_OUTLIER_FILTER` | `bool` | `True` | If `False`, the IQR filter is skipped entirely and outliers are left as-is. Set to `False` if you want to inspect the raw data before deciding on cleaning. |
-#
-# This step runs four sub-tasks in order:
-# 1. **Structural validation** — sorted index, timezone-naive, no all-NaN columns, no non-numeric columns, date-range coverage.
-# 2. **Internal-gap report** — for each column, counts NaN values that fall *between* the first and last valid observation (i.e. true internal gaps, not leading/trailing missing data).
-# 3. **Outlier filter** — replaces values outside `[Q1 − k·IQR, Q3 + k·IQR]` with `NaN`. Applied to `df` directly so that cleaned data is what gets saved in Step 6.
-# 4. **Overview plot** — plots the selected columns after cleaning so the chart reflects the final saved state.
+# | `PLOT_COLS` | `list[str]` or `None` | `None` | Columns to include in the overview plot. Set to a list (e.g. `['Temp', 'Umid', 'Rad.Sol.']`) to restrict the view. `None` plots all columns. |
+# | `OUTLIER_IQR_FACTOR` | `float` | `5.0` | Multiplier on the IQR used to define outlier fences per column. Lower values are more aggressive (e.g. `3.0`); raise to `10.0` to only catch extreme spikes. |
+# | `APPLY_OUTLIER_FILTER` | `bool` | `True` | Set to `False` to skip outlier replacement entirely and inspect raw data first. |
+# | `HIGHLIGHT_GAPS` | `bool` | `True` | Whether to shade internal NaN runs in the overview plot. Delegates to `plot_proxy_overview(highlight_gaps=...)`. |
 
 # %%
 # === USER INPUT ===
 PLOT_COLS            = None   # e.g. ['Temp', 'Umid', 'Rad.Sol.'] or None for all columns
-OUTLIER_IQR_FACTOR   = 5.0    # IQR fence multiplier — increase to keep more data
+OUTLIER_IQR_FACTOR   = 5.0    # IQR fence multiplier
 APPLY_OUTLIER_FILTER = True   # False = skip outlier replacement entirely
+HIGHLIGHT_GAPS      = True   # False = suppress crimson gap bands in the plot
 # ==================
-
-import numpy as np
 
 validation_ok = True
 
@@ -424,36 +438,7 @@ else:
 print(f'\nFinal dataset: {df.shape[0]:,} rows × {df.shape[1]} columns')
 
 # ------------------------------------------------------------------
-# 2. Internal-gap report
-# ------------------------------------------------------------------
-print('\n── Internal-gap report (NaNs between first and last valid observation) ──')
-cols_to_check = PLOT_COLS if PLOT_COLS is not None else df.columns.tolist()
-any_internal_gaps = False
-for col in cols_to_check:
-    if col not in df.columns:
-        print(f'  {col:<20}  ⚠ column not found — check PLOT_COLS spelling')
-        continue
-    series = df[col]
-    first_valid = series.first_valid_index()
-    last_valid  = series.last_valid_index()
-    if first_valid is None:
-        print(f'  {col:<20}  entirely NaN — skipped')
-        continue
-    interior = series.loc[first_valid:last_valid]
-    n_internal = interior.isnull().sum()
-    pct_internal = n_internal / len(interior) * 100 if len(interior) > 0 else 0.0
-    status = f'  {col:<20}  {n_internal:>6,} internal NaNs  ({pct_internal:.2f}%)'
-    if n_internal > 0:
-        print(f'⚠ {status}')
-        any_internal_gaps = True
-    else:
-        print(f'✓ {status}')
-
-if not any_internal_gaps:
-    print('✓ No internal gaps detected in any plotted column.')
-
-# ------------------------------------------------------------------
-# 3. IQR outlier filter  (applied to df — affects saved output)
+# 2. IQR outlier filter  (applied to df — affects saved output)
 # ------------------------------------------------------------------
 if APPLY_OUTLIER_FILTER:
     print(f'\n── Outlier filter (IQR × {OUTLIER_IQR_FACTOR}) ──')
@@ -463,7 +448,7 @@ if APPLY_OUTLIER_FILTER:
         q3  = df[col].quantile(0.75)
         iqr = q3 - q1
         if iqr == 0:
-            continue   # constant column — skip to avoid degenerate fence
+            continue
         lower = q1 - OUTLIER_IQR_FACTOR * iqr
         upper = q3 + OUTLIER_IQR_FACTOR * iqr
         mask  = (df[col] < lower) | (df[col] > upper)
@@ -480,10 +465,14 @@ else:
     print('\n── Outlier filter skipped (APPLY_OUTLIER_FILTER = False) ──')
 
 # ------------------------------------------------------------------
-# 4. Overview plot — reflects cleaned data
+# 3. Overview plot — gap bands rendered inside plot_proxy_overview
 # ------------------------------------------------------------------
 df_plot = df[PLOT_COLS] if PLOT_COLS is not None else df
-plot_proxy_overview(df_plot, station_slug=STATION_SLUG, n_cols=4)
+plot_proxy_overview(
+    df_plot,
+    station_slug=STATION_SLUG,
+    highlight_gaps=HIGHLIGHT_GAPS,
+)
 
 # %% [markdown]
 # ## Step 6 · Save

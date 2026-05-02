@@ -40,6 +40,52 @@ def _save_figure(fig, save_path, filename):
     fig.savefig(svg_path, format='svg', bbox_inches='tight')
     print(f"Plot saved successfully to {save_path} as {filename}")
 
+
+def _compute_internal_gap_spans(series):
+    """
+    Returns a list of (start, end) Timestamp tuples for every contiguous run of
+    NaN values that lies strictly between the first and last valid observation
+    (i.e. internal gaps only — leading/trailing NaNs are excluded).
+
+    Parameters
+    ----------
+    series : pd.Series
+        Numeric time series with a DatetimeIndex.
+
+    Returns
+    -------
+    spans : list of tuple(pd.Timestamp, pd.Timestamp)
+        Each tuple is (gap_start, gap_end) inclusive of the bounding NaN rows.
+        Returns an empty list if no internal gaps are found.
+    """
+    first_valid = series.first_valid_index()
+    last_valid  = series.last_valid_index()
+    if first_valid is None or last_valid is None:
+        return []
+
+    interior = series.loc[first_valid:last_valid]
+    is_nan   = interior.isnull()
+    if not is_nan.any():
+        return []
+
+    spans     = []
+    in_gap    = False
+    gap_start = None
+
+    for ts, null in zip(interior.index, is_nan):
+        if null and not in_gap:
+            gap_start = ts
+            in_gap    = True
+        elif not null and in_gap:
+            spans.append((gap_start, interior.index[interior.index.get_loc(ts) - 1]))
+            in_gap = False
+
+    if in_gap:
+        spans.append((gap_start, interior.index[-1]))
+
+    return spans
+
+
 def plot_annual_overlay(data, y_var, plot_type='scatter', cmap='viridis',
                         alpha=0.6, width=4, num_xticks=10,
                         title=None, xlabel='Date', ylabel=None,
@@ -385,11 +431,9 @@ def plot_compensation_comparison(
     if theme_kwargs is not None:
         apply_theme(**theme_kwargs)
 
-    # Resolve dropped marker size — default to 4x the signal dot size
     if dropped_dot_size is None:
         dropped_dot_size = dot_size * 4
 
-    # ── 1. Load full series ──────────────────────────────────────────────────
     df = pd.read_csv(file_path, parse_dates=['datetime'], index_col='datetime')
     df.sort_index(inplace=True)
 
@@ -397,20 +441,17 @@ def plot_compensation_comparison(
     comp_col = signal_col
     has_raw  = raw_col in df.columns
 
-    # ── 2. Load dropped rows if available ────────────────────────────────────
     df_dropped = None
     if dropped_path and os.path.exists(dropped_path):
         df_dropped = pd.read_csv(dropped_path, parse_dates=['datetime'], index_col='datetime')
         df_dropped.sort_index(inplace=True)
 
-    # ── 3. Compute difference on FULL series before any zoom ─────────────────
     if has_raw:
         raw_ref   = df[raw_col].dropna().iloc[0]
-        raw_full  = df[raw_col] - raw_ref      # normalize raw for visual only
-        comp_full = df[comp_col]               # already normalized — never touch
+        raw_full  = df[raw_col] - raw_ref
+        comp_full = df[comp_col]
         diff_full = comp_full - raw_full
 
-    # ── 4. Apply date filter = zoom only ─────────────────────────────────────
     def _slice(s, s0, s1):
         if s0: s = s.loc[s0:]
         if s1: s = s.loc[:s1]
@@ -426,11 +467,9 @@ def plot_compensation_comparison(
     if df_dropped is not None and not df_dropped.empty:
         df_dropped = _slice(df_dropped, date_start, date_end)
 
-    # ── 5. Plot ───────────────────────────────────────────────────────────────
     if has_raw:
         fig, axes = plt.subplots(2, 1, figsize=(14, 7), sharex=True)
 
-        # Panel 1: scatter raw vs compensated + dropped overlay
         ax = axes[0]
         ax.scatter(raw_plot.index,  raw_plot,  s=dot_size, color='steelblue',
                    alpha=0.7, linewidths=0, label='Raw')
@@ -471,7 +510,6 @@ def plot_compensation_comparison(
                   markerscale=max(1, 6 / max(dot_size, 0.1)))
         sns.despine(ax=ax)
 
-        # Panel 2: compensation difference
         ax = axes[1]
         ax.fill_between(diff_plot.index, diff_plot, 0, where=(diff_plot >= 0),
                         color='darkorange', alpha=0.55, linewidth=0,
@@ -512,18 +550,27 @@ def plot_proxy_overview(
     df,
     station_slug,
     n_cols=4,
+    highlight_gaps=True,
+    gap_color='crimson',
+    gap_alpha=0.25,
     save_plot=False,
     save_path='outputs/figures',
     filename='proxy_overview',
     theme_kwargs=None,
 ):
     """
-    Quick multi-panel time-series overview of the first ``n_cols`` numeric
-    columns in a proxy DataFrame.
+    Multi-panel time-series overview of all numeric columns in a proxy DataFrame,
+    with optional visual highlighting of internal gaps.
 
     Intended for use in auxiliary proxy-download notebooks (e.g.
-    ``meteosystem_italy``) after data standardisation to visually confirm
-    that the downloaded series are complete and plausible before saving.
+    ``meteosystem_italy``) after data standardisation and outlier filtering,
+    to visually confirm that the series are complete and plausible before saving.
+
+    When ``highlight_gaps=True``, each subplot overlays semi-transparent
+    crimson bands over every contiguous run of NaN values that lies strictly
+    *between* the first and last valid observation of that column (internal gaps
+    only). Leading or trailing missing data at the series edges is not shaded.
+    The gap-span computation reuses ``_compute_internal_gap_spans``.
 
     Parameters
     ----------
@@ -534,6 +581,13 @@ def plot_proxy_overview(
         Station identifier used in the plot title (e.g. ``'gubbio'``).
     n_cols : int, optional
         Maximum number of columns to plot. Default 4.
+    highlight_gaps : bool, optional
+        If ``True`` (default), shade internal NaN runs in each subplot using
+        ``_compute_internal_gap_spans``. Set to ``False`` to suppress shading.
+    gap_color : str, optional
+        Matplotlib colour for the gap highlight bands. Default ``'crimson'``.
+    gap_alpha : float, optional
+        Opacity for the gap highlight bands (0–1). Default ``0.25``.
     save_plot : bool, optional
         If ``True``, saves the figure as PNG and SVG via ``_save_figure()``.
         Default ``False``.
@@ -549,6 +603,8 @@ def plot_proxy_overview(
     None
         Displays the figure inline. Saves to disk only if ``save_plot=True``.
     """
+    import matplotlib.patches as mpatches
+
     if theme_kwargs is not None:
         apply_theme(**theme_kwargs)
 
@@ -557,16 +613,33 @@ def plot_proxy_overview(
         print('plot_proxy_overview: no numeric columns found — nothing to plot.')
         return
 
-    n_plot = min(len(numeric_cols), n_cols)
+    cols_to_plot = numeric_cols
+    n_plot = len(cols_to_plot)
     fig, axes = plt.subplots(n_plot, 1, figsize=(14, 3 * n_plot), sharex=True)
     if n_plot == 1:
         axes = [axes]
 
-    for ax, col in zip(axes, numeric_cols[:n_plot]):
+    legend_gap_added = False
+
+    for ax, col in zip(axes, cols_to_plot):
         ax.plot(df.index, df[col], linewidth=0.5, color='steelblue')
         ax.set_ylabel(col, fontsize=8)
         ax.grid(True, alpha=0.3)
         sns.despine(ax=ax)
+
+        if highlight_gaps:
+            spans = _compute_internal_gap_spans(df[col])
+            for gap_start, gap_end in spans:
+                ax.axvspan(gap_start, gap_end,
+                           color=gap_color, alpha=gap_alpha, linewidth=0)
+            if spans and not legend_gap_added:
+                gap_patch = mpatches.Patch(
+                    color=gap_color, alpha=gap_alpha * 2,
+                    label='Internal gap (missing data)'
+                )
+                ax.legend(handles=[gap_patch], loc='upper right',
+                          fontsize=7, frameon=True)
+                legend_gap_added = True
 
     axes[0].set_title(
         f'Meteosystem {station_slug.capitalize()} \u2014 quick overview',
